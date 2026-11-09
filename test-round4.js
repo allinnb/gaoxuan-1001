@@ -2,6 +2,7 @@ const assert=require('assert'),fs=require('fs'),{webcrypto}=require('crypto'),{J
 const html=fs.readFileSync(__dirname+'/index.html','utf8');
 assert(!html.includes('"wanneng"'),'source-content 不得含 wanneng');
 assert(html.includes('monthPillar}月'),'分享卡必须使用 monthPillar');
+for(const typo of ['六衝','往裏掃','搞玄*壹仟林壹夜'])assert(!html.includes(typo),'公開頁面不應出現：'+typo);
 assert(!html.includes('function drawQR(ctx,text,x,y,size){let n=29,seed='),'不得保留杂凑二维码');
 const png=PNG.sync.read(fs.readFileSync(__dirname+'/share-card-sample.png')),code=jsQR(new Uint8ClampedArray(png.data),png.width,png.height,{inversionAttempts:'attemptBoth'});assert(code,'分享卡二维码应可解码');assert.strictEqual(code.data,'https://allinnb.github.io/gaoxuan-1001/');
 console.log('✓ 分享卡 QR 可由 jsQR 解码为网站 URL');

@@ -33,7 +33,7 @@ full_blob=json.dumps(blob,separators=(',',':'))
 T=(p/'template.html').read_text('utf-8')
 T=cc.convert(T)
 # 人工校對專名與品牌名稱
-for a,b in {'搞玄*壹仟林壹夜':'搞玄*壹仟林壹夜','釵釧金':'釵釧金','井木犴':'井木犴','白蠟金':'白蠟金','長流水':'長流水','醜':'丑'}.items(): T=T.replace(a,b)
+for a,b in {'搞玄*壹仟林壹夜':'搞玄*壹仟林壹夜','釵釧金':'釵釧金','井木犴':'井木犴','白蠟金':'白蠟金','長流水':'長流水','醜':'丑','六衝':'六冲','往裏掃':'往里扫','搞玄*壹仟林壹夜':'壹仟林壹夜','搞玄-分享卡.png':'壹仟林壹夜-分享卡.png'}.items(): T=T.replace(a,b)
 qr=(p/'node_modules/qrcode-generator/dist/qrcode.js').read_text('utf-8')
 T=T.replace('__CALENDAR__',cal).replace('__CONTENT__',content).replace('__FULL_BLOB__',full_blob).replace('__QRCODE_LIB__',qr).replace('__COVER__',cover).replace('__FU__',fu)
 (p/'index.html').write_text(T,'utf-8')
