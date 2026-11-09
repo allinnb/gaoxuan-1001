@@ -1,0 +1,12 @@
+const assert=require('assert'),fs=require('fs'),vm=require('vm');
+const html=fs.readFileSync(__dirname+'/index.html','utf8'),m=html.match(/<script id="calendar-data" type="application\/json">([\s\S]*?)<\/script>[\s\S]*?<script id="app-core">([\s\S]*?)<\/script>/);const ctx={console,CALENDAR_DATA:JSON.parse(m[1]),Date};vm.createContext(ctx);vm.runInContext(m[2],ctx);const C=ctx.GX;let n=0;const eq=(a,b,l)=>{n++;assert.deepStrictEqual(JSON.parse(JSON.stringify(a)),b,l);console.log('✓ '+l)};
+let nb=C.trueSolar('1980-06-06','12:00',121.55);eq(nb.time,'12:08','寧波真太陽時');eq(nb.date,'1980-06-06','寧波日期不跨日');
+let wl=C.trueSolar('2000-01-01','12:00',87.6);eq(wl.time,'09:47','烏魯木齊真太陽時');eq(C.calculateTrueSolar('2000-01-01','12:00',87.6).hourBranch,'巳','真太陽時時支');
+let cross=C.trueSolar('2025-06-30','00:10',0);eq(cross.date,'2025-06-29','真太陽時向前跨日');eq(C.calculateTrueSolar('2025-06-30','00:10',0).solar,'2025-06-29','日柱跟隨真太陽日期');
+let bazi=C.calculateTrueSolar('1980-06-06','12:00',121.55);eq(bazi.monthPillar,'壬午','五虎遁月柱');eq(bazi.hourPillar,'壬午','五鼠遁時柱');eq(bazi.timePart,'中','午時中');
+eq(C.zodiacRelations(6),{sanhe:['虎','狗'],liuhe:'羊',liuchong:'鼠',selfWear:false},'屬馬三合六合六衝');
+eq(C.buddha(6),'大勢至菩薩','屬馬本命佛');eq(C.baBai(5,6),false,'蛇年六月不犯八敗');eq(C.baBai(8,6),true,'猴年六月犯八敗');
+eq(C.guGua(0,['寅','午','戌']),{'孤辰':true,'寡宿':true},'子年四支查孤寡');eq(C.guGua(1,['寅','戌']),{'孤辰':true,'寡宿':true},'丑年仍屬亥子丑組');eq(C.guGua(4,['巳','丑']),{'孤辰':true,'寡宿':true},'辰年屬寅卯辰組');
+let beforeZi=C.calculateTrueSolar('2025-06-30','22:59',120),lateZi=C.calculateTrueSolar('2025-06-30','23:10',120);eq(beforeZi.dayPillar,'庚午','真太陽23時前仍是本日日柱');eq(lateZi.dayPillar,'辛未','真太陽23時起子時歸次日日柱');eq(C.ironBroom(8,1,'男','子'),{'犯':true,'方向':'往外掃'},'申年正月男命鐵掃帚');eq(C.ironBroom(8,12,'女','未'),{'犯':true,'方向':'往裏掃'},'申年十二月女命鐵掃帚');
+eq(C.nineStar(14,'男'),'太陽','男虛歲十四太陽');eq(C.nineStar(16,'女'),'太陽','女虛歲十六太陽');
+console.log(`\nRULES-v2 全部 ${n} 項斷言通過。`);
