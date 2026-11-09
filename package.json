@@ -1,0 +1,24 @@
+{
+  "name": "gaoxuan-spec",
+  "version": "1.0.0",
+  "description": "",
+  "main": "test-all-timezones.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/allinnb/gaoxuan-1001.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/allinnb/gaoxuan-1001/issues"
+  },
+  "homepage": "https://github.com/allinnb/gaoxuan-1001#readme",
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}
