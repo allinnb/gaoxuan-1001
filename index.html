@@ -2331,4 +2331,3 @@ function makeShare(){if(!last)return;let c=shareCanvas,x=c.getContext('2d'),r=re
 makeCard.onclick=makeShare;downloadCard.onclick=()=>{let c=makeShare(),a=document.createElement('a');a.download='壹仟林壹夜-分享卡.png';a.href=c.toDataURL('image/png');a.click()};shareCard.onclick=async()=>{let c=makeShare(),b=await new Promise(r=>c.toBlob(r,'image/png')),f=new File([b],'壹仟林壹夜-分享卡.png',{type:'image/png'});if(navigator.share)await navigator.share({title:'壹仟林壹夜',files:[f]});else alert('此瀏覽器不支援 Web Share，請下載 PNG。')};
 quickBtn.onclick=()=>{let p=+zodiacQuick.value,y=((+quickYear.value-4)%12+12)%12,a=C.taisui(p,y);quickResult.textContent=a.length?a.join(' + ')+'：反正都是「你這次仆街啦！」':'不犯五太歲，先別急着慶功。'};render(C.calculateSolar('2025-06-30','12:00'));
 </script></body></html>
-
