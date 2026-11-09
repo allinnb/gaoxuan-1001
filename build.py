@@ -15,7 +15,11 @@ for f in (p/'src').glob('src-*.txt'):
  if key.lower()=='wanneng': continue
  s=f.read_text('utf-8'); s=re.sub(r'\[[^\]]*https?://[^\]]*\]','',s); s=re.sub(r'https?://\S+','',s); texts[key]=cc.convert(s.strip())
 content=json.dumps(texts,ensure_ascii=False).replace('</','<\\/')
-full={"nianzhu":json.loads((p/'rules-v2/alt/nianzhu.json').read_text('utf-8')),"hourParts":json.loads((p/'rules-v2/alt/110724.json').read_text('utf-8'))}
+rules=(p/'rules-v2/RULES-v2-part2.md').read_text('utf-8')
+year_branch=dict(re.findall(r'^\*\*([子丑寅卯辰巳午未申酉戌亥])（[^）]+）\*\*\s*(.+)$',rules,re.M))
+month_text={i+1:x for i,x in enumerate(re.findall(r'^- ((?:正|二|三|四|五|六|七|八|九|十|子|腊)月生人.+)$',rules,re.M)[:12])}
+hour_text=dict(re.findall(r'^- ([子丑寅卯辰巳午未申酉戌亥])时生人[：:]\s*(.+)$',rules,re.M))
+full={"nianzhu":json.loads((p/'rules-v2/alt/nianzhu.json').read_text('utf-8')),"yearBranch":year_branch,"month":month_text,"hour":hour_text,"hourParts":json.loads((p/'rules-v2/alt/110724.json').read_text('utf-8'))}
 raw_k=os.getenv('GAOXUAN_MASTER_KEY','')
 blob={}
 if raw_k:
