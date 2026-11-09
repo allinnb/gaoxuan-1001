@@ -19,6 +19,9 @@
   },
   "homepage": "https://github.com/allinnb/gaoxuan-1001#readme",
   "devDependencies": {
-    "jsdom": "^29.1.1"
+    "jsdom": "^29.1.1",
+    "jsqr": "^1.4.0",
+    "pngjs": "^7.0.0",
+    "qrcode-generator": "^2.0.4"
   }
 }
