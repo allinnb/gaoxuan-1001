@@ -8,6 +8,6 @@ eq(C.zodiacRelations(6),{sanhe:['虎','狗'],liuhe:'羊',liuchong:'鼠',selfWear
 eq(C.buddha(6),'大勢至菩薩','屬馬本命佛');eq(C.baBai(5,6),false,'蛇年六月不犯八敗');eq(C.baBai(8,6),true,'猴年六月犯八敗');
 eq(C.guGua(0,['寅','午','戌']),{'孤辰':true,'寡宿':true},'子年四支查孤寡');eq(C.guGua(1,['寅','戌']),{'孤辰':true,'寡宿':true},'丑年仍屬亥子丑組');eq(C.guGua(4,['巳','丑']),{'孤辰':true,'寡宿':true},'辰年屬寅卯辰組');
 let overview=C.calculateSolar('2025-06-30','12:00');eq(overview.yearPillar,'乙巳','命卜總覽年柱');eq(overview.yearNayin,'覆燈火','命卜總覽納音按年柱，不用日柱庚午路旁土');
-let beforeZi=C.calculateTrueSolar('2025-06-30','22:59',120),lateZi=C.calculateTrueSolar('2025-06-30','23:10',120);eq(beforeZi.dayPillar,'庚午','真太陽23時前仍是本日日柱');eq(lateZi.dayPillar,'辛未','真太陽23時起子時歸次日日柱');eq(C.ironBroom(8,1,'男','子'),{'犯':true,'方向':'往外掃'},'申年正月男命鐵掃帚');eq(C.ironBroom(8,12,'女','未'),{'犯':true,'方向':'往里扫'},'申年十二月女命鐵掃帚');
+let beforeZi=C.calculateTrueSolar('2025-06-30','22:59',120),lateZi=C.calculateTrueSolar('2025-06-30','23:10',120);eq(beforeZi.dayPillar,'庚午','真太陽23時前仍是本日日柱');eq(lateZi.dayPillar,'辛未','真太陽23時起子時歸次日日柱');eq(C.ironBroom(8,1,'男','子'),{'犯':true,'方向':'往外掃'},'申年正月男命鐵掃帚');eq(C.ironBroom(8,12,'女','未'),{'犯':true,'方向':'往裏掃'},'申年十二月女命鐵掃帚');
 eq(C.nineStar(14,'男'),'太陽','男虛歲十四太陽');eq(C.nineStar(16,'女'),'太陽','女虛歲十六太陽');
 console.log(`\nRULES-v2 全部 ${n} 項斷言通過。`);
