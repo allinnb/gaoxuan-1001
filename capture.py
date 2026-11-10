@@ -10,7 +10,7 @@ with sync_playwright() as p:
   page.locator('#summary').scroll_into_view_if_needed(); page.screenshot(path=str(OUT/f'{width}-02-ticket.png'),full_page=False)
   details=page.locator('details').first
   if details.count(): details.evaluate('(e)=>e.open=true'); details.scroll_into_view_if_needed(); page.screenshot(path=str(OUT/f'{width}-03-card-expanded.png'),full_page=False)
-  page.locator('#fullModules').scroll_into_view_if_needed(); page.screenshot(path=str(OUT/f'{width}-04-full-locked.png'),full_page=False)
+  page.locator('#v2Preview').scroll_into_view_if_needed(); page.screenshot(path=str(OUT/f'{width}-04-full-visible.png'),full_page=False)
   canvas=page.evaluate("""()=>{const c=makeShare('9:16');return c.toDataURL('image/png')}""")
   import base64
   (OUT/f'{width}-05-share-card.png').write_bytes(base64.b64decode(canvas.split(',',1)[1]))
