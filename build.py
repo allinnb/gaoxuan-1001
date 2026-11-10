@@ -49,10 +49,26 @@ for sheet in pd.ExcelFile(xlsx_path).sheet_names:
   if not all(values.values()): raise SystemExit(f'COPY VALIDATION FAILED: incomplete {sheet}/{group}/{key}')
   bucket[key]=values; total+=1
  for group,rows in copy[sheet].items(): stats.append((sheet,group,len(rows)))
-if total!=300: raise SystemExit(f'COPY VALIDATION FAILED: expected 300, got {total}')
+if total!=300: raise SystemExit(f'COPY VALIDATION FAILED: expected base 300, got {total}')
+full_copy_path=p/'data/搞玄-完整命書文案表.xlsx'
+if not full_copy_path.exists(): raise SystemExit('COPY VALIDATION FAILED: '+str(full_copy_path)+' not found')
+copy['完整命書']={}
+for sheet in pd.ExcelFile(full_copy_path).sheet_names:
+ df=pd.read_excel(full_copy_path,sheet_name=sheet,dtype=str).fillna(''); bucket=copy['完整命書'].setdefault(sheet,{})
+ for _,row in df.iterrows():
+  group=trad(str(row.get('group','')).strip()); key=trad(str(row.get('key','')).strip())
+  if group!=sheet or not key: raise SystemExit(f'COPY VALIDATION FAILED: invalid complete-reading row {sheet}/{group}/{key}')
+  if key in bucket: raise SystemExit(f'COPY VALIDATION FAILED: duplicate 完整命書/{sheet}/{key}')
+  values={f:trad(str(row.get(f,'')).strip()) for f in ('tag','keywords','plain','tip','quote')}
+  if sheet=='時辰': values.update({f:trad(str(row.get(f,'')).strip()) for f in ('ke_shang','ke_zhong','ke_xia')})
+  if not all(values.values()): raise SystemExit(f'COPY VALIDATION FAILED: incomplete 完整命書/{sheet}/{key}')
+  bucket[key]=values; total+=1
+ for group,rows in copy['完整命書'].items():
+  if group==sheet: stats.append(('完整命書',group,len(rows)))
+if total!=432: raise SystemExit(f'COPY VALIDATION FAILED: expected 432, got {total}')
 (p/'copy.json').write_text(json.dumps(copy,ensure_ascii=False,indent=2),'utf-8')
 for sheet,group,n in stats: print(f'COPY {sheet} / {group}: {n}')
-print('validated nested copy.json with',total,'entries')
+print('validated nested copy.json with',total,'entries (300 base + 132 complete-reading)')
 copy_content=safe_json(copy)
 
 rules=(p/'rules-v2/RULES-v2-part2.md').read_text('utf-8')
