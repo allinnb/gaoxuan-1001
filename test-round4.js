@@ -1,7 +1,7 @@
 const assert=require('assert'),fs=require('fs'),{JSDOM}=require('jsdom'),jsQR=require('jsqr'),{PNG}=require('pngjs');
 const html=fs.readFileSync(__dirname+'/index.html','utf8');
 assert(!html.includes('"wanneng"'),'source-content 不得含 wanneng');
-assert(html.includes("pillars:[sr.yearPillar,sr.monthPillar,sr.dayPillar,sr.hourPillar]"),'分享卡必須使用四柱');
+assert(html.includes("pillars:[sr.yearPillar,sr.monthPillar,sr.dayPillar,unknownTime.checked?'不詳':sr.hourPillar]"),'分享卡必須使用四柱，時辰不詳時須明示');
 assert(!html.includes('六衝'),'公開頁面不應出現六衝');assert(html.includes('往裏掃'),'應保留繁體往裏掃');assert(html.includes('搞玄*壹仟林壹夜'),'品牌名稱必須完整顯示');
 assert(!html.includes('function drawQR(ctx,text,x,y,size){let n=29,seed='),'不得保留雜湊二維碼');
 const png=PNG.sync.read(fs.readFileSync(__dirname+'/share-card-sample.png')),code=jsQR(new Uint8ClampedArray(png.data),png.width,png.height,{inversionAttempts:'attemptBoth'});assert(code,'分享卡二維碼應可解碼');assert.strictEqual(code.data,'https://allinnb.github.io/gaoxuan-1001/');
