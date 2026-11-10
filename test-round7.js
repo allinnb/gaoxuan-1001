@@ -11,6 +11,15 @@ for(const [group,n] of Object.entries({'年柱':60,'年支':12,'月份':12,'時�
 assert(copy['完整命書']['時辰']['子'].ke_shang);assert(copy['完整命書']['時辰']['子'].ke_zhong);assert(copy['完整命書']['時辰']['子'].ke_xia);
 assert(copy['衣祿財運']['先天衣祿（12 條）']!==copy['衣祿財運']['後天衣祿（12 條）']);
 assert(copy['今年太歲']['十二太歲神']['太陽']);assert(copy['九星值年']['九星（9 條）']['太陽']);
+assert.strictEqual((html.match(/林叔/g)||[]).length,0,'線上 index.html 全文不得再有林叔');assert((html.match(/散人曰：/g)||[]).length>=1,'至少要有一處散人曰：');
+assert(html.includes('min="1926-01-01"')&&html.includes('max="2126-12-31"'),'公曆範圍必須是 1926–2126');
+const cities=JSON.parse(html.match(/<script id="cities-content" type="application\/json">([\s\S]*?)<\/script>/)[1]);assert(cities.length>=250,'城市至少 250 筆');assert(cities.every(x=>x.tz),'每筆城市必須有 tz');
+function submitScenario(date,time,cityName='北京'){const {dom,errors}=setup(),w=dom.window,d=w.document,city=[...d.querySelector('#birthCity').options].find(o=>o.textContent===cityName);d.querySelector('#solarDate').value=date;d.querySelector('#birthTime').value=time;d.querySelector('#birthCity').value=city.value;d.querySelector('#birthCity').dispatchEvent(new w.Event('change',{bubbles:true}));d.querySelector('#birthForm').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));return{dom,errors,text:d.body.textContent,d}}
+{
+ const {dom,d}=submitScenario('1988-07-01','12:00');assert(d.querySelector('#freePack').textContent.includes('丁巳 · 乙巳'),'北京 1988 夏令時應得到日柱丁巳、時柱乙巳');assert(d.body.textContent.includes('當年實行夏令時，已減 1 小時'),'夏令時計算說明缺失');dom.window.close();
+ for(const [date,time,ok] of [['1926-01-01','00:30',true],['2126-12-31','23:30',true],['1925-12-31','12:00',false],['2127-01-01','12:00',false]]){const {dom,text,errors,d:doc}=submitScenario(date,time);if(ok){assert.strictEqual(errors.length,0,`${date} 邊界應可計算`);const visible=doc.querySelector('#freePack').textContent;assert(!/NaN|undefined/.test(visible),`${date} 邊界出現空值`);const expected=date==='1926-01-01'?'乙丑 · 戊子 · 庚寅 · 丙子':'丙戌 · 庚子 · 甲子 · 甲子';assert(visible.includes(expected),`${date} 四柱應為 ${expected}`)}else assert(errors.some(e=>String(e).includes('本站支援 1926 至 2126 年出生')),`${date} 應顯示範圍提示`);dom.window.close()}
+ const {dom:dom3}=setup(),d3=dom3.window.document;const years=[...d3.querySelector('#lunarYear').options].map(x=>x.textContent),months=[...d3.querySelector('#lunarMonth').options].map(x=>x.textContent),days=[...d3.querySelector('#lunarDay').options].map(x=>x.textContent);for(const x of ['一九八〇年（庚申）','二一二六年（丙戌）'])assert(years.includes(x),`缺農曆年選項 ${x}`);for(const x of ['正月','臘月'])assert(months.includes(x),`缺農曆月選項 ${x}`);for(const x of ['初一','廿九'])assert(days.includes(x),`缺農曆日選項 ${x}`);dom3.window.close();
+}
 const scenarios=[
  ['1980-06-06','12:00','男','寧波',false],['1995-02-03','23:30','女','北京',false],['2000-08-15','06:00','男','臺北',false],['1988-12-31','13:00','女','紐約',false],['2010-03-01','12:00','男','上海',true],['1985-07-04','18:00','女','洛杉磯',false]
 ];
