@@ -8,6 +8,7 @@ import pandas as pd
 cc=OpenCC('s2tw')
 p=Path(__file__).parent
 cal=(p/'calendar-data.json').read_text('utf-8')
+cities=(p/'cities.json').read_text('utf-8')
 cover=base64.b64encode((p/'cover-01.jpg').read_bytes()).decode()
 fu=base64.b64encode((p/'fu-04.jpg').read_bytes()).decode()
 SPECIAL={'釵釧金':'釵釧金','井木犴':'井木犴','白蠟金':'白蠟金','長流水':'長流水','醜':'丑','六衝':'六沖','往裡掃':'往裏掃'}
@@ -27,7 +28,7 @@ TAISUI_GUIDE='''值太歲：本命生肖與流年生肖相同，即為值太歲�
 texts['taisui']=TAISUI_GUIDE
 content=safe_json(texts)
 
-xlsx_path=Path(r'C:\Users\heyia\Downloads\搞玄-白話文案表.xlsx')
+xlsx_path=p/'data/搞玄-白話文案表.xlsx'
 if not xlsx_path.exists(): raise SystemExit('COPY VALIDATION FAILED: '+str(xlsx_path)+' not found')
 copy={}; total=0; stats=[]
 for sheet in pd.ExcelFile(xlsx_path).sheet_names:
@@ -84,7 +85,7 @@ full_package=safe_json(full)
 T=(p/'template.html').read_text('utf-8')
 T=trad(T)
 qr=(p/'node_modules/qrcode-generator/dist/qrcode.js').read_text('utf-8')
-T=T.replace('__CALENDAR__',cal).replace('__CONTENT__',content).replace('__COPY__',copy_content).replace('__FULL_PACKAGE__',full_package).replace('__QRCODE_LIB__',qr).replace('__COVER__',cover).replace('__FU__',fu)
+T=T.replace('__CALENDAR__',cal).replace('__CITIES__',cities).replace('__CONTENT__',content).replace('__COPY__',copy_content).replace('__FULL_PACKAGE__',full_package).replace('__QRCODE_LIB__',qr).replace('__COVER__',cover).replace('__FU__',fu)
 banned=['吳亦凡','鄭爽','馬雲','許家印','李雲迪','他'+'媽','仆'+'街','泡'+'炮']
 for bad in banned:
  if bad in T: raise SystemExit('CONTENT SAFETY FAILED: prohibited term')
