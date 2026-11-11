@@ -41,7 +41,7 @@ for sheet in pd.ExcelFile(xlsx_path).sheet_names:
   values={
    'tag':trad(str(row.get('人設標籤','')).strip()),'keywords':trad(str(row.get('關鍵詞','')).strip()),
    'plain':trad(re.sub(r'【待核[^】]*】','',str(row.get('白話解讀',''))).replace('□','').strip()),
-   'tip':trad(str(row.get('林叔吐槽','')).strip()),'quote':trad(str(row.get('原文金句','')).strip())}
+   'tip':trad(str(row.get('散人吐槽',row.get('林叔吐槽',''))).strip()),'quote':trad(str(row.get('原文金句','')).strip())}
   # 公開頁不得帶人名、粗口；保留資料語義但改成中性措辭。
   for k,v in values.items():
    replacements=[('吳'+'亦凡','某藝人'),('鄭'+'爽','某藝人'),('馬'+'雲','某企業家'),('許'+'家印','某企業家'),('李'+'雲迪','某藝人'),('他'+'媽','粗口'),('仆'+'街','倒楣'),('泡'+'炮','玩樂')]
@@ -84,6 +84,18 @@ full_package=safe_json(full)
 
 T=(p/'template.html').read_text('utf-8')
 T=trad(T)
+seo='''<link rel="canonical" href="https://gaoxuan.askjoss.com/">
+<meta name="description" content="搞玄·壹仟林壹夜：線上生成四柱八字、稱骨算命與運勢小票，支援1926至2126年出生、農曆、真太陽時、夏令時及256座城市時區換算。">
+<meta name="keywords" content="四柱八字,稱骨算命,真太陽時,農曆,夏令時,出生城市,運勢小票">
+<meta property="og:title" content="搞玄·壹仟林壹夜｜四柱八字與稱骨算命">
+<meta property="og:description" content="支援1926至2126年出生與256座城市時區換算的線上命理工具。">
+<meta property="og:url" content="https://gaoxuan.askjoss.com/">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://gaoxuan.askjoss.com/cover-01.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebApplication","name":"搞玄·壹仟林壹夜","url":"https://gaoxuan.askjoss.com/","applicationCategory":"LifestyleApplication","operatingSystem":"Any","inLanguage":"zh-CN","description":"線上生成四柱八字、稱骨算命與運勢小票，支援1926至2126年出生。","offers":{"@type":"Offer","price":"0","priceCurrency":"CNY"}}</script>
+<script defer data-domain="gaoxuan.askjoss.com" src="https://plausible.io/js/script.js"></script>'''
+T=T.replace('</title>','</title>'+seo,1)
 qr=(p/'node_modules/qrcode-generator/dist/qrcode.js').read_text('utf-8')
 T=T.replace('__CALENDAR__',cal).replace('__CITIES__',cities).replace('__CONTENT__',content).replace('__COPY__',copy_content).replace('__FULL_PACKAGE__',full_package).replace('__QRCODE_LIB__',qr).replace('__COVER__',cover).replace('__FU__',fu)
 banned=['吳亦凡','鄭爽','馬雲','許家印','李雲迪','他'+'媽','仆'+'街','泡'+'炮']
