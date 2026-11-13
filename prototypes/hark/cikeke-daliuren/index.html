@@ -1,0 +1,1790 @@
+<!DOCTYPE html><html lang="zh-CN"><head><style>[data-hark-action]:not([data-hark-ready]){display:none!important}</style><script>(function () {
+"use strict";
+const meta = {"project":"875283f8-46f4-428a-b553-309d9c956afd","artifact":"bede454e-b3a3-431c-873a-1342894ddeed","app":"https://hark.com"};
+// site_runtime.js is the page-button runtime serve puts into every Hark page
+// (site_document.go). Serve wraps it in a function whose first statement is
+// `const meta = {...};`, so `meta` is read from this script's own text and
+// never from an element a page could forge. It asks the Hark app framing the
+// page whether its viewer may press (HELLO), and once the app allows it
+// (ALLOW), reveals the buttons meta allows. It hands a press to the app, marks the pressed
+// element with the press's state (data-hark-state), and gives the page
+// window.Hark.safeHref, window.Hark.app (the page's backend, run by the app
+// framing it as the viewer) and, when absent, window.Hark.data.
+
+// MAX_URL_BYTES must equal maxSiteURLBytes in
+// services/agent/internal/tools/website/site_manifest.go.
+var MAX_URL_BYTES = 512
+
+var ACTION = 'data-hark-action'
+var READY = 'data-hark-ready'
+var ITEM = 'data-hark-item'
+var STATE = 'data-hark-state'
+
+// HELLO, ALLOW, PRESS and RESULT must equal the message types in
+// apps/frontend/src/lib/sitePressBridge.ts.
+var HELLO = 'hark:hello'
+var ALLOW = 'hark:allow'
+var PRESS = 'hark:press'
+var RESULT = 'hark:press-result'
+
+// RESULT_TIMEOUT_MS is how long a press waits for the app's answer before it
+// reads as failed.
+var RESULT_TIMEOUT_MS = 15000
+
+// LOAD, RUN and APP_RESULT must equal the message types in
+// apps/frontend/src/lib/siteAppBridge.ts.
+var LOAD = 'hark:load'
+var RUN = 'hark:run'
+var APP_RESULT = 'hark:result'
+
+// APP_TIMEOUT_MS is how long Hark.app waits for the app's answer. It must
+// exceed PANEL_APP_REQUEST_TIMEOUT_MS (330 s) in
+// apps/frontend/src/lib/goApiPanelApp.ts, so the app's own deadline answers first.
+var APP_TIMEOUT_MS = 340000
+
+var kinds = {}
+;(meta.actions || []).forEach(function (a) {
+  kinds[a.id] = a.kind
+})
+
+// allowed is set once the app framing the page says its viewer may press,
+// which only the page's owner may; the app's send checks every press again.
+var allowed = false
+
+// eligible reports whether meta lets el show once the app allows presses: a
+// declared prompt action, or a declared buy action with an item while buy is on.
+function eligible(el) {
+  if (!meta.app || !allowed) return false
+  var kind = kinds[el.getAttribute(ACTION)]
+  if (kind === 'prompt') return true
+  if (kind === 'buy') return !!meta.buy && el.hasAttribute(ITEM)
+  return false
+}
+
+function reveal(el) {
+  if (el.hasAttribute(READY) || !eligible(el)) return
+  if (kinds[el.getAttribute(ACTION)] === 'buy' && meta.buy_label) {
+    el.textContent = meta.buy_label
+  }
+  el.setAttribute(READY, '')
+}
+
+function revealWithin(node) {
+  if (node.nodeType !== 1) return
+  if (node.hasAttribute(ACTION)) reveal(node)
+  node.querySelectorAll('[' + ACTION + ']').forEach(reveal)
+}
+
+var pending = {}
+var nextRequest = 0
+
+// setState marks every button for el's action and item with a press's state,
+// so a copy of el the page made (a card's sheet) reads the same as el, even
+// one made while the press was on its way. It tells the page once, through a
+// bubbling hark:press event on a button still on the page, so a press from a
+// sheet closed before the answer still reaches the page's listeners. A sent
+// button reads as disabled, since a second tap sends nothing (settled), and
+// says so itself (markSent).
+function setState(el, actionId, state, code) {
+  var buttons = sameButtons(el)
+  buttons.forEach(function (b) {
+    b.setAttribute(STATE, state)
+    if (state === 'sent') markSent(b)
+    else if (state !== 'sending') showNotice(b, noticeFor(state))
+  })
+  if (state === 'sent') showToast(SENT_LABEL)
+  var onPage = el.isConnected ? el : buttons[0]
+  onPage.dispatchEvent(
+    new CustomEvent(PRESS, {
+      bubbles: true,
+      detail: { actionId: actionId, state: state, code: code || '' },
+    }),
+  )
+}
+
+// SENT_LABEL is what a sent button and the toast over the page say.
+var SENT_LABEL = 'Sent to Hark'
+
+// TOAST_MS is how long the toast stays over the page after a press is sent.
+var TOAST_MS = 2400
+
+var SVG_NS = 'http://www.w3.org/2000/svg'
+
+// checkIcon is the 16px check a sent button and the toast lead with.
+function checkIcon() {
+  var svg = document.createElementNS(SVG_NS, 'svg')
+  svg.setAttribute('viewBox', '92 92 16 16')
+  svg.setAttribute('width', '16')
+  svg.setAttribute('height', '16')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('aria-hidden', 'true')
+  var path = document.createElementNS(SVG_NS, 'path')
+  path.setAttribute(
+    'd',
+    'M93 99.55L95.7091 102.249C96.4999 103.037 96.8954 103.431 97.3511 103.579C97.7519 103.709 98.1836 103.709 98.5844 103.579C99.0401 103.431 99.4355 103.037 100.226 102.249L107 95.5',
+  )
+  path.setAttribute('stroke', 'currentColor')
+  path.setAttribute('stroke-width', '2')
+  svg.appendChild(path)
+  return svg
+}
+
+// markSent turns el into a check and "Sent to Hark".
+function markSent(el) {
+  el.setAttribute('aria-disabled', 'true')
+  el.replaceChildren(checkIcon(), document.createTextNode(SENT_LABEL))
+}
+
+// sameButtons is every button on the page for el's action and item, since
+// pressing any of them sends the same thing, then el when it has left the page.
+function sameButtons(el) {
+  var action = el.getAttribute(ACTION)
+  var item = el.getAttribute(ITEM)
+  var all = [].filter.call(document.querySelectorAll('[' + ACTION + ']'), function (b) {
+    return b.getAttribute(ACTION) === action && b.getAttribute(ITEM) === item
+  })
+  if (all.indexOf(el) < 0) all.push(el)
+  return all
+}
+
+// NOTICES are what a button says in place of its own words for NOTICE_MS when
+// its press did not reach Hark. The button then reads as it did and can be
+// pressed again.
+var NOTICES = {
+  sign_in: 'Sign in to Hark',
+  not_allowed: 'Owner only',
+  failed: 'Not sent, try again',
+}
+
+var NOTICE_MS = 3000
+
+// KIT_NOTICE_STYLE hides the message a site's hark.css may write after a
+// button's words for a state, since the notice already stands in for them.
+var KIT_NOTICE_STYLE =
+  '[data-hark-action][data-hark-state="sign_in"]::after,' +
+  '[data-hark-action][data-hark-state="not_allowed"]::after,' +
+  '[data-hark-action][data-hark-state="failed"]::after{content:none!important}'
+
+var kitNoticesHidden = false
+
+// noticeFor is state's notice, or the failed one for a state it does not name.
+function noticeFor(state) {
+  if (Object.prototype.hasOwnProperty.call(NOTICES, state)) return NOTICES[state]
+  return NOTICES.failed
+}
+
+// showNotice puts notice in el in place of its words, at least as wide as the
+// words were so the row around it holds still, and puts the words back when
+// the notice ends.
+function showNotice(el, notice) {
+  hideKitNotices()
+  var words = Array.prototype.slice.call(el.childNodes)
+  var minWidth = el.style.minWidth
+  el.style.minWidth = el.getBoundingClientRect().width + 'px'
+  el.replaceChildren(document.createTextNode(notice))
+  setTimeout(function () {
+    el.replaceChildren.apply(el, words)
+    el.style.minWidth = minWidth
+    el.removeAttribute(STATE)
+  }, NOTICE_MS)
+}
+
+function hideKitNotices() {
+  if (kitNoticesHidden) return
+  kitNoticesHidden = true
+  var style = document.createElement('style')
+  style.textContent = KIT_NOTICE_STYLE
+  document.head.appendChild(style)
+}
+
+// TOAST_STYLE draws the toast: the kit's primary capsule, which grows in from
+// a blur at the bottom of the page and fades back out. Its colors read the
+// kit's tokens and fall back to the kit's light values on a page without it.
+var TOAST_STYLE =
+  '.pill{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom,0px));z-index:2147483647;' +
+  'display:flex;align-items:center;gap:12px;box-sizing:border-box;max-width:calc(100vw - 32px);height:48px;' +
+  'padding:0 20px;border-radius:24px;background:var(--fill-primary,#1d1d1f);color:var(--text-primary-on,#f5f5f7);' +
+  'font:500 15px/1.3 var(--sans,system-ui,-apple-system,sans-serif);white-space:nowrap;' +
+  'box-shadow:var(--hark-shadow,0 8px 40px #1d1d1f1f);pointer-events:none;opacity:0;filter:blur(2px);' +
+  'transform:translateX(-50%) scale(.8);transition:opacity 160ms,filter 160ms,transform 160ms;' +
+  'transition-timing-function:cubic-bezier(.4,0,.2,1)}' +
+  '.pill.shown{opacity:1;filter:blur(0);transform:translateX(-50%) scale(1);transition-duration:300ms}' +
+  '.pill svg{flex:none}.pill span{overflow:hidden;text-overflow:ellipsis}' +
+  '@media (prefers-reduced-motion:reduce){.pill,.pill.shown{filter:none;transform:translateX(-50%)}}'
+
+var toast = null
+var toastTimer = 0
+
+// toastPill is the toast, made on first use inside a shadow root so
+// the page's own styles cannot restyle or hide it.
+function toastPill() {
+  if (toast) return toast
+  var host = document.createElement('div')
+  var root = host.attachShadow({ mode: 'open' })
+  var style = document.createElement('style')
+  style.textContent = TOAST_STYLE
+  toast = document.createElement('div')
+  toast.className = 'pill'
+  toast.setAttribute('role', 'status')
+  toast.setAttribute('aria-live', 'polite')
+  toast.append(checkIcon(), document.createElement('span'))
+  root.append(style, toast)
+  document.body.appendChild(host)
+  return toast
+}
+
+// showToast shows text in the toast for TOAST_MS. Layout is read before the
+// toast is shown, so a toast made this moment still animates in.
+function showToast(text) {
+  var pill = toastPill()
+  pill.lastChild.textContent = text
+  pill.getBoundingClientRect()
+  pill.classList.add('shown')
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(function () {
+    pill.classList.remove('shown')
+  }, TOAST_MS)
+}
+
+// settled reports whether el's press is under way, already reached Hark, or
+// still showing its notice, so a second tap sends nothing.
+function settled(el) {
+  return el.hasAttribute(STATE)
+}
+
+// press hands el's action to the app framing the page. A page nothing frames
+// has no app to send it, and a settled button has sent already, so either
+// press does nothing.
+function press(el) {
+  if (window.parent === window || settled(el)) return
+  var appOrigin = new URL(meta.app).origin
+  var actionId = el.getAttribute(ACTION)
+  var requestId = String(++nextRequest)
+  var timer = setTimeout(function () {
+    if (!pending[requestId]) return
+    delete pending[requestId]
+    setState(el, actionId, 'failed', 'timeout')
+  }, RESULT_TIMEOUT_MS)
+  pending[requestId] = { el: el, actionId: actionId, timer: timer }
+  setState(el, actionId, 'sending')
+  var msg = { type: PRESS, requestId: requestId, artifactId: meta.artifact, actionId: actionId }
+  var item = el.getAttribute(ITEM)
+  if (item) msg.itemId = item
+  window.parent.postMessage(msg, appOrigin)
+}
+
+// onAppMessage takes the app's answers: ALLOW reveals the buttons, and RESULT
+// settles a press. Any other window's message is ignored.
+function onAppMessage(e) {
+  if (e.source !== window.parent || !meta.app || e.origin !== new URL(meta.app).origin) return
+  var d = e.data
+  if (d && d.type === APP_RESULT) {
+    onAppResult(d)
+    return
+  }
+  if (d && d.type === ALLOW) {
+    allowed = true
+    revealWithin(document.documentElement)
+    return
+  }
+  onResult(d)
+}
+
+function onResult(d) {
+  if (!d || d.type !== RESULT || !pending[d.requestId]) return
+  var p = pending[d.requestId]
+  delete pending[d.requestId]
+  clearTimeout(p.timer)
+  setState(p.el, p.actionId, String(d.state || 'failed'), d.code)
+}
+
+function onClick(e) {
+  var target = e.target
+  if (!(target instanceof Element)) return
+  var el = target.closest('[' + ACTION + ']')
+  if (!el || !el.hasAttribute(READY)) return
+  e.preventDefault()
+  press(el)
+}
+
+var appCalls = {}
+
+// callApp asks the app framing the page to run the page's backend and
+// resolves with its answer ({outcome, data, refusal, reason}), or rejects
+// with an Error whose code says why the app could not answer. A page no app
+// frames has no backend to reach.
+function callApp(type, fields) {
+  if (!meta.app || window.parent === window) {
+    return Promise.reject(appError('not_in_hark'))
+  }
+  return new Promise(function (resolve, reject) {
+    var requestId = 'app-' + ++nextRequest
+    var timer = setTimeout(function () {
+      delete appCalls[requestId]
+      reject(appError('timeout'))
+    }, APP_TIMEOUT_MS)
+    appCalls[requestId] = { resolve: resolve, reject: reject, timer: timer }
+    var msg = { type: type, requestId: requestId }
+    Object.keys(fields).forEach(function (k) {
+      msg[k] = fields[k]
+    })
+    window.parent.postMessage(msg, new URL(meta.app).origin)
+  })
+}
+
+function onAppResult(d) {
+  var call = appCalls[d.requestId]
+  if (!call) return
+  delete appCalls[d.requestId]
+  clearTimeout(call.timer)
+  if (d.ok) call.resolve(d.answer)
+  else call.reject(appError(String(d.code || 'failed')))
+}
+
+function appError(code) {
+  var err = new Error('Hark.app: ' + code)
+  err.code = code
+  return err
+}
+
+// safeHref returns s only for an https URL with a host and no user name or
+// password, at most MAX_URL_BYTES long, as siteURL checks it; otherwise "#".
+function safeHref(s) {
+  if (typeof s !== 'string' || new TextEncoder().encode(s).length > MAX_URL_BYTES) return '#'
+  try {
+    var u = new URL(s)
+    if (u.protocol !== 'https:' || !u.hostname || u.username || u.password) return '#'
+    return s
+  } catch (err) {
+    return '#'
+  }
+}
+
+// parseCSV and readData must read a block as the kit's hark-charts.js does
+// (services/agent/internal/tools/website/defaults/hark-charts.js).
+function parseCSV(text) {
+  var rows = []
+  var row = []
+  var field = ''
+  var quoted = false
+  for (var i = 0; i < text.length; i++) {
+    var ch = text[i]
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') {
+        field += '"'
+        i++
+      } else if (ch === '"') quoted = false
+      else field += ch
+    } else if (ch === '"') quoted = true
+    else if (ch === ',') {
+      row.push(field)
+      field = ''
+    } else if (ch === '\n') {
+      row.push(field)
+      rows.push(row)
+      row = []
+      field = ''
+    } else if (ch !== '\r') field += ch
+  }
+  if (field || row.length) {
+    row.push(field)
+    rows.push(row)
+  }
+  var head = rows.shift() || []
+  return rows.map(function (r) {
+    var o = {}
+    head.forEach(function (name, j) {
+      o[name.trim()] = typed(r[j])
+    })
+    return o
+  })
+}
+
+function typed(cell) {
+  var s = (cell == null ? '' : cell).trim()
+  if (s === '') return null
+  return isNaN(s) ? s : Number(s)
+}
+
+function readData(id) {
+  var el = document.getElementById(id)
+  if (!el) throw new Error('Hark.data: no element with id ' + id)
+  return el.type === 'text/csv' ? parseCSV(el.textContent.trim()) : JSON.parse(el.textContent)
+}
+
+var hark = (window.Hark = window.Hark || {})
+hark.safeHref = safeHref
+hark.app = {
+  load: function () {
+    return callApp(LOAD, {})
+  },
+  run: function (action, input) {
+    var fields = { action: String(action) }
+    if (input !== undefined) fields.input = input
+    return callApp(RUN, fields)
+  },
+}
+if (typeof hark.data !== 'function') hark.data = readData
+
+document.addEventListener('click', onClick, true)
+window.addEventListener('message', onAppMessage)
+new MutationObserver(function (records) {
+  records.forEach(function (r) {
+    if (r.type === 'attributes') revealWithin(r.target)
+    else r.addedNodes.forEach(revealWithin)
+  })
+}).observe(document.documentElement, {
+  childList: true,
+  subtree: true,
+  attributes: true,
+  attributeFilter: [ACTION, ITEM],
+})
+// The observer sees nodes added after this point; the parse may already have
+// added some, and not every engine reports parser insertions to it.
+revealWithin(document.documentElement)
+document.addEventListener('DOMContentLoaded', function () {
+  revealWithin(document.documentElement)
+})
+// A page no app frames, or one framed by anything but the app, is never
+// answered, so it shows no buttons.
+if (meta.app && window.parent !== window) {
+  window.parent.postMessage({ type: HELLO }, new URL(meta.app).origin)
+}
+
+})();</script>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>此刻课 大六壬决策</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com"/>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin=""/>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400&amp;display=swap"/>
+    <style>/* Hark's design tokens and component styles. Each component's rules follow its @component comment. style-gates: data */
+
+/* @component foundations */
+/* Every component switches layout at one of three widths: 600px, below which a page takes a phone's
+   spacing; 761px, from which two-up components (stats, checklists, pairs) sit side by side; and 900px,
+   from which heads, steps, timelines, cards and the hero's callout take their desktop layout. Media
+   queries cannot read custom properties, so each query writes one side of those widths, and
+   TestKitStylesheetsShareThreeBreakpoints holds every kit file to them. */
+:root {
+  color-scheme: light dark;
+
+  --text-primary: light-dark(#1d1d1f, #f5f5f7);         /* body text */
+  --text-secondary: light-dark(#636366, #a1a1a6);       /* supporting grey text */
+  --text-tertiary: light-dark(#1d1d1f4d, #f5f5f74d);    /* hollow dots, faint marks; never body text */
+  --text-primary-on: light-dark(#f5f5f7, #1d1d1f);      /* text on --fill-primary */
+  --text-secondary-on: light-dark(#aeaeb2, #5c5c60);    /* grey text on --fill-primary */
+  --fill-primary: light-dark(#1d1d1f, #f5f5f7);         /* the strong fill: solid chips, the nav, the badge */
+  --fill-primary-on: light-dark(#f5f5f7, #1d1d1f);      /* the page background */
+  --fill-secondary: light-dark(#1d1d1f80, #f5f5f780);
+  --fill-tertiary: light-dark(#e8e8ea, #2a2a2d);        /* the grey card, panel and row tint */
+  --fill-segment: light-dark(#3a3a3c, #e2e2e4);         /* the nav's tab track */
+  --fill-system-green: #00a665;                         /* status: done, ready */
+  --fill-system-orange: #ff4d00;                        /* status: now, current */
+  --fill-system-red: light-dark(#da2f35, #f1555b);      /* status: blocked, error */
+  --transparent-primary: light-dark(#1d1d1f4d, #f5f5f74d);
+  --stroke-primary: light-dark(#1d1d1f24, #f5f5f724);   /* strong hairline */
+  --stroke-secondary: light-dark(#1d1d1f12, #f5f5f712); /* faint hairline between rows */
+  --stroke-primary-on: light-dark(#f5f5f71a, #1d1d1f1a);
+  --stroke-composer: light-dark(#f5f5f780, #1d1d1f80);  /* the callout's glass edge */
+  --stroke-system-orange: #ff4d0026;
+  --hover-wash: light-dark(#1d1d1f0d, #f5f5f70d);
+  --hover-wash-primary-on: light-dark(#f9f9fa26, #1d1d1f14);
+
+  /* The hero is light text over a dark photo in both themes. */
+  --hero-surface: #161f39;
+  --hero-text: #f5f5f7;
+  --hero-text-muted: #f5f5f7cc;
+  --hero-scrim-strong: rgb(22 31 57 / 0.78);
+  --hero-scrim-soft: rgb(22 31 57 / 0.3);
+  --hero-scrim-side: rgb(22 31 57 / 0.45);
+  --hero-glass: rgb(22 31 57 / 0.42);
+  --hero-glass-faint: rgb(22 31 57 / 0.35);
+  --hero-glass-stroke: rgb(245 245 247 / 0.28);
+
+  --mat-regular: light-dark(rgb(255 255 255 / 0.56), rgb(29 29 31 / 0.55));
+  --mat-thin: light-dark(rgb(255 255 255 / 0.22), rgb(29 29 31 / 0.4));
+  --mat-agent: light-dark(rgb(255 255 255 / 0.84), rgb(29 29 31 / 0.66));
+  --mat-inverse: color-mix(in srgb, var(--fill-primary) 86%, transparent);  /* the nav: dark on light, light on dark */
+  --hark-blur: blur(50px) saturate(1.6);
+  --hark-shadow: 0 8px 40px #1d1d1f1f;
+
+  --sans: "GT Standard", "GT Standard L", "Geist", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  --lh: 1.3;                                            /* every text style is 130% */
+  --weight-light: 300;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-bold: 600;
+  --size-caption: 12px;                                 /* the smallest text allowed */
+  --size-meta: 13px;
+  --size-small: 14px;
+  --size-body: 15px;
+  --size-prose: 16px;
+  --size-heading: 20px;
+  --size-figure: clamp(24px, 3vw, 32px);
+  --size-title: clamp(26px, 3vw, 32px);
+  --size-display: clamp(34px, 5vw, 48px);
+  --size-lede: clamp(16px, 1.7vw, 20px);
+
+  --type-caption: var(--weight-regular) var(--size-caption)/var(--lh) var(--sans);
+  --type-tag: var(--weight-medium) var(--size-caption)/var(--lh) var(--sans);
+  --type-small: var(--weight-regular) var(--size-small)/var(--lh) var(--sans);
+  --type-label: var(--weight-medium) var(--size-small)/var(--lh) var(--sans);
+  --type-body: var(--weight-regular) var(--size-body)/var(--lh) var(--sans);
+  --type-body-strong: var(--weight-medium) var(--size-body)/var(--lh) var(--sans);
+  --type-heading: var(--weight-medium) var(--size-heading)/var(--lh) var(--sans);
+  --type-lede: var(--weight-medium) var(--size-lede)/var(--lh) var(--sans);
+  --type-figure: var(--weight-regular) var(--size-figure)/var(--lh) var(--sans);
+  --type-title: var(--weight-regular) var(--size-title)/var(--lh) var(--sans);
+  --type-display: var(--weight-medium) var(--size-display)/var(--lh) var(--sans);
+  --type-numeral: var(--weight-regular) 48px/1 var(--sans);
+
+  --r-s: 12px;
+  --r-m: 16px;
+  --r-l: 24px;
+  --r-xl: 32px;
+  --r-pill: 100px;
+
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --dur-quick: 160ms;
+
+  --page-max: 1120px;
+  --gutter: clamp(16px, 3vw, 32px);                     /* the page's side padding */
+  --tap: 44px;                                          /* the smallest touch target */
+}
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+
+* { box-sizing: border-box; }
+/* The page keeps its own bounce but never hands a fling on: a page is framed in Hark's /site
+   page, and a fling past its top would otherwise carry on into that page and drag the frame down. */
+html, body { overscroll-behavior-y: contain; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+/* The page background lives on body and html stays transparent, so the browser paints the whole
+   canvas, and the band a bounce reveals, in body's color, including a page's own override of it. */
+body {
+  margin: 0;
+  background: var(--fill-primary-on);
+  color: var(--text-primary);
+  font: var(--type-body);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+img { max-width: 100%; display: block; }
+figure { margin-inline: 0; }
+a { color: inherit; }
+b, strong { font-weight: var(--weight-bold); }
+p { margin: 0; text-wrap: pretty; }
+h1, h2, h3 { margin: 0; text-wrap: balance; }
+small { font-size: max(var(--size-caption), 0.85em); }
+.sub { color: var(--text-secondary); }
+
+:focus-visible { outline: 2px solid var(--fill-primary); outline-offset: 3px; border-radius: 6px; }
+
+/* @component page */
+.page {
+  max-width: var(--page-max);
+  margin: 0 auto;
+  padding-inline: var(--gutter);
+  padding-block: 12px 40px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+.main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; min-width: 0; }
+
+.glass {
+  background: var(--mat-inverse);
+  -webkit-backdrop-filter: var(--hark-blur);
+  backdrop-filter: var(--hark-blur);
+  border: 1px solid var(--stroke-primary-on);
+}
+.nav {
+  position: sticky;
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
+  z-index: 20;
+  justify-self: center;
+  max-width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px;
+  border-radius: var(--r-pill);
+  box-shadow: var(--hark-shadow);
+}
+.nav :focus-visible { outline-color: var(--fill-primary-on); }
+.seg {
+  display: flex;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-radius: var(--r-pill);
+  background: var(--fill-segment);
+}
+.seg::-webkit-scrollbar { display: none; }
+.seg a {
+  flex: none;
+  padding: 8px 14px;
+  border-radius: var(--r-pill);
+  font: var(--type-label);
+  color: var(--text-secondary-on);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.seg a:hover { color: var(--text-primary-on); }
+/* The active tab carries its own fill so its text is measured against it. */
+.seg a[aria-current="true"] { background: var(--fill-primary-on); color: var(--text-primary); }
+.theme-btn {
+  flex: none;
+  width: 36px; height: 36px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: var(--hover-wash-primary-on);
+  color: var(--text-primary-on);
+  cursor: pointer;
+}
+.theme-btn:hover { box-shadow: inset 0 0 0 100px var(--hover-wash-primary-on); }
+.theme-btn::before { content: ""; width: 14px; height: 14px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px currentColor; background: linear-gradient(to right, light-dark(currentColor, transparent) 50%, light-dark(transparent, currentColor) 50%); }
+@media (max-width: 599px) {
+  .seg a { display: flex; align-items: center; min-height: var(--tap); }
+  .theme-btn { width: var(--tap); height: var(--tap); }
+}
+
+/* @component footer */
+.foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px 24px;
+  padding-top: 24px;
+  border-top: 1px solid var(--stroke-secondary);
+  font-size: var(--size-small);
+  color: var(--text-secondary);
+}
+.foot strong { color: var(--text-primary); }
+.foot nav { display: flex; flex-wrap: wrap; gap: 6px; }
+.foot nav a {
+  padding: 6px 12px;
+  border-radius: var(--r-pill);
+  background: var(--fill-tertiary);
+  color: var(--text-primary);
+  font: var(--type-tag);
+  text-decoration: none;
+}
+.foot nav a:hover { box-shadow: inset 0 0 0 100px var(--hover-wash); }
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: var(--r-xl);
+  background: var(--fill-primary);
+  color: var(--text-primary-on);
+  box-shadow: var(--hark-shadow);
+  font: var(--weight-medium) var(--size-body)/1.1 var(--sans);
+  text-decoration: none;
+}
+.badge:hover { box-shadow: var(--hark-shadow), inset 0 0 0 100px var(--hover-wash-primary-on); }
+.hark-mark { display: inline-grid; place-items: center; }
+.hark-mark svg { display: block; }
+@media (max-width: 599px) {
+  .foot nav a { display: inline-flex; align-items: center; min-height: var(--tap); min-width: var(--tap); }
+  .badge { min-height: var(--tap); }
+}
+
+/* @component chip */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 8px;
+  border-radius: var(--r-pill);
+  font: var(--type-tag);
+  max-width: 100%;
+  background: var(--fill-tertiary);
+  color: var(--text-secondary);
+  vertical-align: middle;
+}
+.chip::before {
+  content: "";
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  flex: none;
+  box-shadow: inset 0 0 0 1.5px var(--text-tertiary);
+}
+.chip--solid { background: var(--fill-primary); color: var(--text-primary-on); }
+.chip--solid::before { background: var(--fill-system-green); box-shadow: none; }
+td .chip { white-space: nowrap; }
+/* @component dot */
+.dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font: var(--type-tag);
+  color: var(--text-primary);
+}
+.dot::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--fill-system-green); }
+tbody th .dot { display: flex; width: fit-content; }
+/* @component pill */
+.pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: var(--r-pill);
+  background: var(--fill-tertiary);
+  color: var(--text-secondary);
+  font: var(--type-tag);
+  white-space: normal;
+  vertical-align: 1px;
+}
+/* @component button, link and links */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 5px 12px;
+  border-radius: var(--r-s);
+  background: var(--fill-primary-on);
+  color: var(--text-primary);
+  border: 1px solid var(--stroke-primary);
+  font: var(--type-tag);
+  text-decoration: none;
+  max-width: 100%;
+  transition: box-shadow var(--dur-quick) ease;
+}
+.btn:hover { box-shadow: inset 0 0 0 100px var(--hover-wash); }
+.btn[target="_blank"]::after { content: "\2197"; font-size: 11px; color: var(--text-secondary); }
+.link {
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-decoration-color: var(--stroke-primary);
+  text-underline-offset: 3px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.link:hover { text-decoration-color: currentColor; }
+.links { display: flex; flex-wrap: wrap; gap: 8px; }
+@media (pointer: coarse), (max-width: 599px) { .btn { min-height: var(--tap); padding-inline: 14px; } }
+
+/* A button that asks Hark is the page's primary capsule. Once it sends, Hark
+   writes a check and "Sent to Hark" into it, and it turns secondary. A press
+   that does not send shows a short notice in place of its words for a moment. */
+.btn[data-hark-action] {
+  justify-content: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 0 20px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--fill-primary);
+  color: var(--text-primary-on);
+  font: var(--type-body-strong);
+  text-align: center;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: box-shadow var(--dur-quick) ease, transform var(--dur-quick) ease;
+}
+.btn[data-hark-action]:hover { box-shadow: inset 0 0 0 100px var(--hover-wash-primary-on); }
+.btn[data-hark-action]:active { transform: scale(0.97); }
+.btn[data-hark-action] svg { flex: none; }
+.btn[data-hark-action][data-hark-state="sent"] { background: var(--fill-tertiary); color: var(--text-primary); box-shadow: none; }
+
+[data-hark-action][data-hark-state="sending"] { opacity: 0.6; pointer-events: none; }
+[data-hark-action][data-hark-state="sent"] { pointer-events: none; cursor: default; }
+@media (max-width: 599px) {
+  .link { display: inline-flex; align-items: center; min-width: var(--tap); min-height: var(--tap); margin: -13px 0; vertical-align: middle; }
+}
+/* @component text and fineprint */
+.prose { display: grid; gap: 12px; max-width: 68ch; font-size: var(--size-prose); }
+.fineprint { font-size: var(--size-small); color: var(--text-secondary); max-width: 70ch; }
+/* @component hero */
+.hero {
+  position: relative;
+  min-height: clamp(320px, 46vh, 480px);
+  border-radius: var(--r-xl);
+  overflow: hidden;
+  display: flex;
+  align-items: flex-end;
+  color: var(--hero-text);
+  isolation: isolate;
+  box-shadow: var(--hark-shadow);
+  background: var(--hero-surface);
+}
+/* Without a photo the hero is as tall as its copy, so the callout sits beside the copy instead of over it. */
+.hero:not(:has(.hero__img)) { min-height: 0; background: var(--hero-surface) center / cover no-repeat; }
+.hero:not(:has(.hero__img))::after { background: linear-gradient(to right, var(--hero-scrim-side) 0%, transparent 60%); }
+@media (min-width: 900px) {
+  .hero:not(:has(.hero__img)) > .callout { position: static; flex: none; align-self: flex-start; margin: clamp(16px, 2.4vw, 24px) clamp(16px, 2.4vw, 24px) clamp(16px, 2.4vw, 24px) auto; }
+}
+.hero__img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 40% 60%;
+  z-index: -2;
+}
+.hero::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background:
+    linear-gradient(to top, var(--hero-scrim-strong) 0%, var(--hero-scrim-soft) 42%, transparent 66%),
+    linear-gradient(to right, var(--hero-scrim-side) 0%, transparent 60%);
+}
+.hero__copy {
+  display: grid;
+  gap: 14px;
+  max-width: 40rem;
+  padding: clamp(24px, 4vw, 48px);
+  padding-bottom: clamp(28px, 3.4vw, 44px);
+}
+.hero__eyebrow {
+  justify-self: start;
+  padding: 6px 12px;
+  border-radius: var(--r-pill);
+  background: var(--hero-glass);
+  border: 1px solid var(--hero-glass-stroke);
+  -webkit-backdrop-filter: var(--hark-blur);
+  backdrop-filter: var(--hark-blur);
+  font: var(--type-label);
+}
+.hero h1 { font: var(--type-display); letter-spacing: 0; }
+.hero h1 em { font-style: normal; }
+.hero__sub { font: var(--type-lede); max-width: 34ch; }
+.hero__meta { font-size: var(--size-small); color: var(--hero-text-muted); }
+.hero__credit {
+  position: absolute;
+  right: clamp(20px, 3vw, 32px);
+  bottom: 16px;
+  padding: 4px 10px;
+  border-radius: var(--r-pill);
+  background: var(--hero-glass-faint);
+  -webkit-backdrop-filter: var(--hark-blur);
+  backdrop-filter: var(--hark-blur);
+  font: var(--type-caption);
+  color: var(--hero-text-muted);
+}
+/* A callout overlays the photo's top corner, so the hero keeps room for it above the copy. */
+@media (min-width: 900px) { .hero:has(> .callout) { min-height: clamp(420px, 56vh, 560px); } }
+.hero > .callout {
+  position: absolute;
+  top: clamp(16px, 2.4vw, 24px);
+  right: clamp(16px, 2.4vw, 24px);
+  width: min(320px, calc(100% - 32px));
+}
+@media (max-width: 899px) {
+  .hero { flex-direction: column; justify-content: flex-end; align-items: stretch; min-height: 0; }
+  .hero__img { object-position: 22% 50%; }
+  .hero__copy { padding-top: 140px; padding-bottom: 28px; }
+  .hero:not(:has(.hero__img)) .hero__copy { padding-top: clamp(24px, 4vw, 48px); }
+  .hero__credit { top: 16px; right: 16px; bottom: auto; }
+  .hero > .callout { position: static; width: auto; margin: 0 12px 12px; }
+}
+/* On a phone the title starts higher, so the first screen reaches the stats. */
+@media (max-width: 599px) { .hero__copy { padding-top: 88px; padding-bottom: 20px; } }
+/* @component callout */
+.callout {
+  max-width: 420px;
+  display: grid;
+  gap: 10px;
+  padding: 16px 18px 18px;
+  border-radius: var(--r-l);
+  background: var(--mat-agent);
+  -webkit-backdrop-filter: var(--hark-blur);
+  backdrop-filter: var(--hark-blur);
+  border: 1px solid var(--stroke-composer);
+  box-shadow: var(--hark-shadow);
+  color: var(--text-primary);
+  font-size: var(--size-small);
+}
+.callout__head { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-weight: var(--weight-medium); }
+.callout__head svg { color: var(--text-primary); }
+.callout__lead { font-size: var(--size-body); }
+.callout .fineprint { font-size: var(--size-caption); }
+.callout .btn { justify-self: start; }
+/* @component stats */
+.stats { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); padding-top: 8px; }
+.stat {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  gap: 4px;
+  padding: 12px 24px;
+  border-left: 1px solid var(--stroke-secondary);
+}
+.stat:first-child { border-left: 0; padding-left: 0; }
+.stat__fig { font: var(--type-figure); font-variant-numeric: tabular-nums; }
+.stat__label { font-size: var(--size-small); color: var(--text-secondary); }
+@media (max-width: 760px) {
+  .stats { grid-auto-flow: row; grid-template-columns: auto minmax(0, 1fr); column-gap: 12px; padding-top: 0; }
+  .stat { grid-column: 1 / -1; grid-template-columns: subgrid; align-items: baseline; gap: 12px; padding: 14px 0; border-left: 0; border-top: 1px solid var(--stroke-secondary); }
+  .stat:first-child { border-top: 0; }
+}
+/* On a phone the stats sit two to a row, figure over label. */
+@media (max-width: 599px) {
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 0; }
+  .stat { grid-column: auto; grid-template-columns: none; gap: 2px; padding: 12px 0; }
+  .stat:nth-child(2) { border-top: 0; }
+  .stat:nth-child(even) { padding-left: 16px; border-left: 1px solid var(--stroke-secondary); }
+  .stat__fig { font-size: 26px; line-height: 1.15; }
+  .stat__label { font-size: var(--size-caption); }
+}
+/* @component section */
+.section {
+  padding-block: clamp(40px, 6vw, 72px) clamp(16px, 2vw, 24px);
+  border-top: 1px solid var(--stroke-secondary);
+  scroll-margin-top: calc(env(safe-area-inset-top, 0px) + 72px); /* Clears the sticky .nav: its top offset plus its tallest height, 56px. */
+  min-width: 0;
+}
+.section > * + * { margin-top: clamp(20px, 2.4vw, 28px); }
+.section > .head + * { margin-top: 0; }
+.head {
+  display: grid;
+  grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr);
+  gap: 10px 40px;
+  align-items: end;
+  margin-bottom: clamp(24px, 3vw, 36px);
+}
+.head__eyebrow { grid-column: 1 / -1; font: var(--type-label); color: var(--text-secondary); }
+.head h2 { font: var(--type-title); }
+.head__sub { justify-self: end; font-size: var(--size-body); color: var(--text-secondary); max-width: 44ch; text-align: right; }
+@media (max-width: 899px) { .head { grid-template-columns: 1fr; } .head__sub { justify-self: start; text-align: left; } }
+/* @component table */
+.table-wrap { margin-inline: -12px; padding-inline: 12px; overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font: var(--type-small); font-variant-numeric: tabular-nums; }
+caption { text-align: left; font: var(--type-caption); color: var(--text-secondary); padding: 0 0 10px; }
+th, td { text-align: left; vertical-align: top; padding: 12px; border-bottom: 1px solid var(--stroke-secondary); }
+th:first-child, td:first-child { padding-left: 0; }
+th:last-child, td:last-child { padding-right: 0; }
+thead th {
+  font: var(--type-tag);
+  color: var(--text-secondary);
+  border-bottom-color: var(--stroke-primary);
+  padding-top: 0;
+  padding-bottom: 8px;
+  white-space: nowrap;
+}
+tbody th { font-weight: var(--weight-bold); }
+tbody tr:last-child > * { border-bottom: 0; }
+.rowhead { white-space: nowrap; }
+td small, th small { display: block; font: var(--type-caption); color: var(--text-secondary); margin-top: 2px; }
+td.num { font-weight: var(--weight-bold); white-space: nowrap; }
+td.num small { white-space: normal; }
+.muted { color: var(--text-secondary); }
+tr.is-highlight > * { background: var(--fill-tertiary); }
+tr.is-highlight > :first-child { box-shadow: -12px 0 var(--fill-tertiary); }
+tr.is-highlight > :last-child { box-shadow: 12px 0 var(--fill-tertiary); }
+.after-table { margin-top: 20px; padding-inline: 12px; }
+@media (max-width: 599px) {
+  .table-wrap table, .table-wrap tbody, .table-wrap tr, .table-wrap th, .table-wrap td { display: block; }
+  .table-wrap thead { display: none; }
+  .table-wrap caption { display: block; text-align: left; }
+  /* A row is its name on top, then its cells wrapped three or four to a line, each label over its value. */
+  .table-wrap tbody tr { display: flex; flex-wrap: wrap; gap: 8px 20px; padding: 14px 0; border-bottom: 1px solid var(--stroke-secondary); }
+  .table-wrap tbody tr.is-highlight { margin-inline: -12px; padding-inline: 12px; background: var(--fill-tertiary); }
+  .table-wrap tbody tr.is-highlight > * { background: none; box-shadow: none; }
+  .table-wrap tbody tr > * { border-bottom: 0; padding: 0; }
+  .table-wrap tbody tr > th { flex: 1 0 100%; }
+  .table-wrap tbody td.is-empty { display: none; }
+  .table-wrap tbody td[data-label]::before { content: attr(data-label); display: block; color: var(--text-secondary); font-size: var(--size-caption); font-weight: var(--weight-regular); line-height: 1.3; }
+  .table-wrap tbody td:has(> .link:only-child) { align-self: end; }
+  .table-wrap tbody td:has(> .link:only-child)::before { display: none; }
+  .rowhead { white-space: normal; }
+}
+/* @component compare */
+.compare { margin-inline: -12px; overflow-x: auto; scroll-snap-type: x mandatory; }
+.compare table { table-layout: fixed; min-width: calc(var(--compare-cols, 3) * 200px); }
+.compare th, .compare td { scroll-snap-align: start; padding-inline: 12px; }
+.compare thead th { font: var(--type-body-strong); color: var(--text-primary); white-space: normal; padding-top: 0; padding-bottom: 14px; border-bottom-color: var(--stroke-secondary); }
+/* On light tiles a white product backdrop blends into the grey. */
+.compare__media { position: relative; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; width: 100%; aspect-ratio: 4 / 3; max-height: 240px; margin: 0 0 12px; padding: 16px; border-radius: var(--r-m); background: var(--fill-tertiary); }
+.compare__media img { max-width: 100%; max-height: 100%; mix-blend-mode: multiply; }
+/* A photo of a place or a room fills its frame instead of fitting whole. */
+.compare .compare__media.compare__media--photo { padding: 0; overflow: hidden; background: var(--fill-tertiary); }
+.compare .compare__media.compare__media--photo img { position: absolute; inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; object-fit: cover; mix-blend-mode: normal; }
+.compare thead th > .chip { display: flex; width: fit-content; margin-top: 8px; }
+.compare:has(.compare__media) thead th:not(:has(.compare__media))::before { content: ""; display: block; width: 100%; aspect-ratio: 4 / 3; max-height: 240px; margin-bottom: 12px; border-radius: var(--r-m); background: var(--fill-tertiary); }
+:root[data-theme="dark"] .compare__media img { mix-blend-mode: normal; border-radius: var(--r-s); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .compare__media img { mix-blend-mode: normal; border-radius: var(--r-s); } }
+/* The header column shrinks to nothing on screen but stays in the table, so screen readers keep each value's row header. */
+.js .compare tbody th[scope="row"], .js .compare thead td:first-child { width: 0; padding: 0; border: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.js .compare td[data-label]::before { content: attr(data-label); content: attr(data-label) / ""; display: block; margin-bottom: 4px; font: var(--type-caption); color: var(--text-secondary); }
+/* On a phone two options show side by side, and the rest are a swipe away. */
+@media (max-width: 599px) { .compare table { min-width: calc(var(--compare-cols, 3) * 46vw); } .compare th, .compare td { padding-inline: 8px; } }
+/* @component steps */
+.step {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr) minmax(220px, 0.78fr);
+  gap: 16px 28px;
+  padding: 28px 0;
+  border-bottom: 1px solid var(--stroke-secondary);
+}
+.step > * { min-width: 0; }
+.steps > .step:last-child { border-bottom: 0; }
+.step p + p { margin-top: 8px; }
+.step__num { font: var(--type-numeral); color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.step__eyebrow { margin-top: 8px; font: var(--type-label); color: var(--text-secondary); }
+.step h3 { font: var(--type-heading); margin-bottom: 12px; }
+.step__pills { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.step__pills li {
+  padding: 4px 10px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--stroke-primary);
+  font-size: var(--size-meta);
+  color: var(--text-secondary);
+  max-width: 100%;
+}
+.step__pills b { color: var(--text-primary); font-weight: var(--weight-bold); }
+.step__panel {
+  align-self: start;
+  margin: 0;
+  padding: 16px 18px;
+  border-radius: var(--r-m);
+  background: var(--fill-tertiary);
+  font-size: var(--size-small);
+}
+.step__panel dt { font-size: var(--size-caption); color: var(--text-secondary); margin-bottom: 2px; }
+.step__panel dd { margin: 0 0 12px; }
+.step__panel dd:last-child { margin-bottom: 0; }
+.step__panel .fineprint { display: block; margin-top: 6px; font-size: var(--size-caption); }
+.step__panel .btn { margin-top: 8px; }
+.step__figure { grid-column: 2 / span 2; margin: 0; }
+.step__figure img { width: 100%; height: clamp(200px, 26vw, 320px); object-fit: cover; border-radius: var(--r-m); }
+.step__figure figcaption { font-size: var(--size-caption); color: var(--text-secondary); padding-top: 10px; }
+@media (min-width: 900px) {
+  .step:not(:has(> .step__panel)) { grid-template-columns: 112px minmax(0, 1fr); }
+  .step:not(:has(> .step__panel)) > .step__figure { grid-column: 2; }
+}
+@media (max-width: 899px) {
+  .step { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .step__figure { grid-column: 1; }
+  .step__intro { display: flex; align-items: baseline; gap: 14px; }
+  .step__num { font-size: 40px; }
+  .step__eyebrow { margin-top: 0; }
+}
+/* @component checklist */
+.checklist { display: grid; grid-template-columns: minmax(0, 1.4fr) auto minmax(0, 1fr); column-gap: 20px; list-style: none; margin: 0; padding: 0; }
+.checklist:not(:has(.checklist__note)) { grid-template-columns: minmax(0, 1fr) auto; }
+.checklist > li {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  row-gap: 8px;
+  align-items: center;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--stroke-secondary);
+}
+.checklist > li:last-child { border-bottom: 0; }
+.checklist__item { grid-column: 1; font-weight: var(--weight-bold); }
+.checklist > li > .chip { grid-column: 2; justify-self: start; }
+.checklist:not(:has(.checklist__note)) > li > .chip { justify-self: end; }
+.checklist__item small { display: block; font-weight: var(--weight-regular); font-size: var(--size-caption); color: var(--text-secondary); margin-top: 2px; }
+.checklist__note { grid-column: 3; font-size: var(--size-small); color: var(--text-secondary); }
+.checklist > li.is-done .checklist__item { text-decoration: line-through; text-decoration-color: var(--text-tertiary); }
+/* A row's own button sits in a last column, so each booking is pressed where it is listed. */
+.checklist:has(> li > .btn) { grid-template-columns: minmax(0, 1.4fr) auto minmax(0, 1fr) auto; }
+.checklist:has(> li > .btn):not(:has(.checklist__note)) { grid-template-columns: minmax(0, 1fr) auto auto; }
+.checklist > li > .btn { grid-column: -2; justify-self: end; }
+.checklist > li > .btn[data-hark-action] { min-height: 36px; padding: 0 16px; font: var(--type-label); white-space: nowrap; }
+@media (max-width: 760px) {
+  .checklist, .checklist:has(> li > .btn), .checklist:has(> li > .btn):not(:has(.checklist__note)) { grid-template-columns: minmax(0, 1fr) auto; }
+  .checklist > li > .chip { justify-self: end; }
+  .checklist__note { grid-column: 1 / -1; }
+  .checklist > li:has(> .btn) > .checklist__note { grid-column: 1; }
+  .checklist > li > .btn { grid-column: 2; justify-self: end; }
+}
+/* @component breakdown */
+.breakdown { max-width: 720px; }
+@media (min-width: 900px) { .section > .breakdown, .section > .aside { max-width: calc((100% - 40px) * 1.65 / 2.65); } }
+.breakdown dl { margin: 0; }
+.breakdown .row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--stroke-secondary);
+}
+.breakdown dt { font-size: var(--size-body); }
+.breakdown dt small { display: block; color: var(--text-secondary); font-size: var(--size-meta); margin-top: 2px; }
+.breakdown dd { margin: 0; font-weight: var(--weight-bold); font-size: var(--size-body); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.breakdown .row--total {
+  margin-top: -1px;
+  padding: 18px 0 0;
+  border-top: 1px solid var(--stroke-primary);
+  border-bottom: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+}
+.breakdown .row--total dt { font: var(--type-body-strong); }
+.breakdown .row--total dd { font: var(--type-figure); white-space: normal; }
+.breakdown .fineprint { margin-top: 16px; }
+/* @component pair */
+.pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: clamp(20px, 3vw, 40px); align-items: start; }
+.pair:has(> :is(.callout, .aside):last-child) { grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr); column-gap: 40px; }
+.pair > .callout { max-width: none; }
+@media (max-width: 760px) { .pair, .pair:has(> :is(.callout, .aside):last-child) { grid-template-columns: minmax(0, 1fr); } }
+/* @component timeline */
+.timeline { display: grid; grid-template-columns: 210px minmax(0, 1fr) auto; column-gap: 28px; list-style: none; margin-inline: 0; margin-bottom: 0; padding: 0; }
+.timeline > li {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  row-gap: 8px;
+  align-items: start;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--stroke-secondary);
+}
+.timeline > li:first-child { padding-top: 0; }
+.timeline > li:last-child { border-bottom: 0; padding-bottom: 0; }
+.timeline__when { display: flex; align-items: baseline; gap: 12px; font-weight: var(--weight-bold); }
+.timeline__when::before {
+  content: "";
+  width: 8px; height: 8px;
+  flex: none;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px var(--text-tertiary);
+  transform: translateY(-1px);
+}
+.timeline > li.is-current .timeline__when::before { background: var(--fill-system-orange); box-shadow: 0 0 0 4px var(--stroke-system-orange); }
+.timeline > li > p:has(> .chip:only-child) { justify-self: end; }
+.timeline__what ul { margin: 0; padding-left: 18px; }
+.timeline__what li { margin-bottom: 4px; }
+.timeline__what li:last-child { margin-bottom: 0; }
+.timeline__what p + p { margin-top: 6px; }
+@media (max-width: 899px) {
+  .timeline { grid-template-columns: minmax(0, 1fr); }
+  .timeline > li > p:has(> .chip:only-child) { justify-self: start; }
+  .timeline__what, .timeline > li > p:last-child { padding-left: 20px; }
+}
+/* @component cards */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 16px; }
+.cards:has(> :nth-child(4):last-child) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.cards > div { padding: 22px 24px; border-radius: var(--r-m); background: var(--fill-tertiary); }
+.cards h3 { font: var(--type-heading); margin-bottom: 10px; }
+.cards ul { margin: 0; padding: 0; list-style: none; }
+.cards li { padding: 10px 0; border-bottom: 1px solid var(--stroke-secondary); }
+.cards li:last-child { border-bottom: 0; padding-bottom: 0; }
+.cards .quote { font: var(--type-heading); margin-bottom: 8px; text-wrap: balance; }
+@media (max-width: 899px) { .cards { grid-template-columns: 1fr; } }
+@media (max-width: 599px) { .cards { gap: 12px; } .cards > div { padding: 18px; } .cards h3 { margin-bottom: 4px; } }
+/* @component aside */
+.aside {
+  max-width: 62ch;
+  padding: 20px 22px;
+  border: 1.5px dashed var(--stroke-primary);
+  border-radius: var(--r-m);
+}
+.aside h3 { font: var(--type-heading); margin-bottom: 6px; }
+/* @component chart */
+.chart { margin-bottom: 8px; padding: 20px 20px 12px; border-radius: var(--r-m); background: var(--fill-tertiary); overflow-x: auto; }
+.chart__cap { font-size: var(--size-caption); color: var(--text-secondary); margin-bottom: 12px; }
+/* @component figure */
+.band { margin-inline: 0; margin-bottom: 0; }
+.band img { width: 100%; height: clamp(240px, 40vw, 520px); object-fit: cover; border-radius: var(--r-xl); }
+.band figcaption { font-size: var(--size-caption); color: var(--text-secondary); padding: 10px 4px 0; }
+.is-portrait img { width: auto; max-width: 100%; height: clamp(320px, 48vw, 560px); }
+</style>
+    <style>.hero:not(:has(.hero__img)) { background-image: url("assets/3d4b25f47b.webp"); }
+</style>
+    <style>
+      :root{--x-bg:#F5F1E8;--x-ink:#1A1A1A;--x-red:#C8102E;--x-card:#FFFDF8;--x-line:rgba(26,26,26,.14);--x-soft:rgba(26,26,26,.74);--x-serif:"Noto Serif SC","Source Han Serif SC","Songti SC","STSong","SimSun",serif}
+      html,body{background:var(--x-bg);color:var(--x-ink)}
+      .x-app{max-width:560px;margin:0 auto;padding:24px var(--gutter) 48px;color:var(--x-ink);font-family:var(--sans)}
+      .x-serif{font-family:var(--x-serif)}
+      .x-head{text-align:center;padding:20px 0 8px}
+      .x-head h1{font-family:var(--x-serif);font-size:44px;line-height:1.1;font-weight:700;letter-spacing:.12em;margin:0}
+      .x-head h1 span{color:var(--x-red)}
+      .x-head p{font:var(--type-body);color:var(--x-soft);margin:10px 0 0}
+      .x-head .x-seal{display:inline-block;border:2px solid var(--x-red);color:var(--x-red);font-family:var(--x-serif);font-size:13px;padding:2px 8px;border-radius:4px;margin-bottom:12px;letter-spacing:.2em}
+      .x-panel{background:var(--x-card);border:1px solid var(--x-line);border-radius:var(--r-l);padding:20px;margin-top:20px}
+      .x-panel h2{font-family:var(--x-serif);font-size:22px;font-weight:700;margin:0 0 14px}
+      .x-label{font:var(--type-label);color:var(--x-soft);margin:16px 0 8px;display:block}
+      .x-chips{display:flex;flex-wrap:wrap;gap:8px}
+      .x-chip{min-height:var(--tap);padding:0 16px;border-radius:var(--r-pill);border:1px solid var(--x-line);background:transparent;color:var(--x-ink);font:var(--type-body);cursor:pointer}
+      .x-chip[aria-pressed="true"]{background:var(--x-ink);color:var(--x-bg);border-color:var(--x-ink)}
+      .x-input{width:100%;min-height:var(--tap);box-sizing:border-box;border:1px solid var(--x-line);border-radius:var(--r-s);background:var(--x-bg);color:var(--x-ink);font:var(--type-body);padding:10px 12px}
+      .x-input:focus,.x-chip:focus-visible,.x-btn:focus-visible{outline:2px solid var(--x-red);outline-offset:2px}
+      .x-seg{display:flex;gap:8px;margin-bottom:8px}
+      .x-cast{display:flex;justify-content:center;padding:28px 0 8px}
+      .x-ringwrap{position:relative;width:200px;height:200px}
+      .x-ring{position:absolute;inset:0;border-radius:50%;border:1px dashed var(--x-line)}
+      .x-ring span{position:absolute;left:50%;top:50%;width:24px;height:24px;margin:-12px;text-align:center;line-height:24px;font-family:var(--x-serif);font-size:15px;color:var(--x-soft)}
+      .x-ring.is-spin{animation:x-spin 1s cubic-bezier(.4,0,.2,1)}
+      .x-ring.is-spin span{color:var(--x-red)}
+      @keyframes x-spin{to{transform:rotate(360deg)}}
+      .x-castbtn{position:absolute;left:50%;top:50%;width:112px;height:112px;margin:-56px;border-radius:50%;border:none;background:var(--x-red);color:#fff;font-family:var(--x-serif);font-size:28px;font-weight:700;letter-spacing:.2em;cursor:pointer;box-shadow:0 6px 20px rgba(200,16,46,.3)}
+      .x-castbtn:disabled{opacity:.8;cursor:wait}
+      .x-hint{text-align:center;font:var(--type-small);color:var(--x-soft);margin:8px 0 0}
+      .x-result[hidden]{display:none}
+      .x-weather{display:flex;align-items:center;gap:14px}
+      .x-weather .x-emo{font-size:48px;line-height:1}
+      .x-weather b{font-family:var(--x-serif);font-size:26px;display:block}
+      .x-weather small{font:var(--type-small);color:var(--x-soft)}
+      .x-tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+      .x-tag{font:var(--type-tag);padding:4px 10px;border-radius:var(--r-pill);border:1px solid var(--x-line);color:var(--x-ink)}
+      .x-tag--red{border-color:var(--x-red);color:var(--x-red)}
+      .x-block{margin-top:18px}
+      .x-block h3{font:var(--type-label);color:var(--x-soft);margin:0 0 4px}
+      .x-block p{font-size:17px;line-height:1.55;margin:0}
+      .x-act{border-left:3px solid var(--x-red);padding-left:12px}
+      .x-acts{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px}
+      .x-scene{background:var(--x-bg);border-radius:var(--r-s);padding:12px 10px;text-align:center}
+      .x-scene small{display:block;font:var(--type-caption);color:var(--x-soft)}
+      .x-scene b{display:block;font-family:var(--x-serif);font-size:26px;margin:4px 0;color:var(--x-ink)}
+      .x-scene span{display:block;font:var(--type-small)}
+      .x-scene em{display:block;font-style:normal;font:var(--type-caption);color:var(--x-red);margin-top:2px}
+      .x-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}
+      .x-btn{min-height:var(--tap);padding:0 18px;border-radius:var(--r-pill);border:1px solid var(--x-ink);background:transparent;color:var(--x-ink);font:var(--type-body);font-weight:500;cursor:pointer}
+      .x-btn--fill{background:var(--x-ink);color:var(--x-bg)}
+      .x-btn--red{background:var(--x-red);border-color:var(--x-red);color:#fff}
+      .x-pro{margin-top:18px;border-top:1px solid var(--x-line);padding-top:12px}
+      .x-pro summary{cursor:pointer;font:var(--type-label);min-height:var(--tap);display:flex;align-items:center}
+      .x-pro dl{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:8px 0 0;font:var(--type-small)}
+      .x-pro dt{color:var(--x-soft)}
+      .x-pro dd{margin:0;font-family:var(--x-serif);font-size:15px}
+      .x-disc{font:var(--type-caption);color:var(--x-soft);margin-top:16px;line-height:1.6}
+      .x-shop h2{margin-bottom:4px}
+      .x-shop>p{font:var(--type-small);color:var(--x-soft);margin:0 0 6px}
+      .x-item{border-top:1px solid var(--x-line);padding:18px 0}
+      .x-item img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:var(--r-m);background:var(--x-bg);display:block}
+      .x-item h3{font-family:var(--x-serif);font-size:20px;margin:12px 0 4px;display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+      .x-item h3 span{color:var(--x-red);font-family:var(--sans);font-size:16px;white-space:nowrap}
+      .x-item p{font:var(--type-small);color:var(--x-soft);margin:0}
+      .x-item h3 b{font-weight:inherit}
+      .x-badge{font-style:normal;font:var(--type-tag);background:var(--x-red);color:#fff;border-radius:4px;padding:1px 6px;margin-left:6px;vertical-align:middle}
+      .x-item .x-btn{margin-top:14px;width:100%}
+      .x-fine{font:var(--type-caption);color:var(--x-soft);margin:8px 0 0;line-height:1.6}
+      .x-modal{position:fixed;inset:0;background:rgba(26,26,26,.45);display:flex;align-items:flex-end;justify-content:center;z-index:50}
+      .x-modal[hidden]{display:none}
+      .x-sheet{background:var(--x-card);color:var(--x-ink);width:100%;max-width:560px;border-radius:var(--r-l) var(--r-l) 0 0;padding:24px var(--gutter) 32px;box-sizing:border-box}
+      .x-sheet h3{font-family:var(--x-serif);font-size:20px;margin:0 0 8px}
+      .x-sheet pre{white-space:pre-wrap;font:var(--type-small);background:var(--x-bg);border-radius:var(--r-s);padding:12px;margin:0 0 12px}
+      .x-sheet p{font:var(--type-body);margin:0 0 12px}
+      .x-toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:var(--x-ink);color:var(--x-bg);padding:12px 18px;border-radius:var(--r-pill);font:var(--type-label);z-index:60;opacity:0;pointer-events:none;transition:opacity var(--dur-quick) var(--ease-out)}
+      .x-toast.is-on{opacity:1}
+      @media (prefers-reduced-motion:reduce){.x-ring.is-spin{animation:none}}
+    </style>
+  </head>
+  <body>
+    <div class="page" id="top">
+      <main class="x-app">
+        <header class="x-head">
+          <p class="x-seal">大六壬</p>
+          <h1>此<span>刻</span>课</h1>
+          <p>起一课，3 秒给你一个倾向、一个理由、一步行动。</p>
+        </header>
+
+        <section class="x-panel" id="cast" aria-labelledby="cast-h">
+          <h2 id="cast-h">起课</h2>
+          <span class="x-label">你在纠结哪类事？</span>
+          <div class="x-chips" id="cats" role="group" aria-label="事情类别"></div>
+          <label class="x-label" for="q">一句话说说你在纠结什么（可不填）</label>
+          <input class="x-input" id="q" maxlength="60" placeholder="比如：要不要先给他发消息"/>
+          <span class="x-label">起课时间（北京时间）</span>
+          <div class="x-seg" role="group" aria-label="时间">
+            <button class="x-chip" id="t-now" aria-pressed="true" type="button">现在</button>
+            <button class="x-chip" id="t-custom" aria-pressed="false" type="button">自定义</button>
+          </div>
+          <input class="x-input" id="dt" type="datetime-local" hidden="" aria-label="自定义北京时间"/>
+          <div class="x-cast">
+            <div class="x-ringwrap">
+              <div class="x-ring" id="ring" aria-hidden="true"></div>
+              <button class="x-castbtn" id="go" type="button">起课</button>
+            </div>
+          </div>
+          <p class="x-hint" id="hint">先选一个类别</p>
+        </section>
+
+        <section class="x-panel x-result" id="result" hidden="" aria-live="polite">
+          <div class="x-weather"><span class="x-emo" id="r-emo"></span><div><b id="r-wx"></b><small id="r-meta"></small></div></div>
+          <div class="x-tags" id="r-tags"></div>
+          <div class="x-block"><h3>理由</h3><p id="r-why"></p></div>
+          <div class="x-block x-act"><h3>一步行动</h3><p id="r-do"></p></div>
+          <div class="x-block"><h3>三幕剧</h3><div class="x-acts" id="r-acts"></div></div>
+          <div class="x-row">
+            <button class="x-btn x-btn--fill" id="again" type="button">再起一课</button>
+            <button class="x-btn" id="engrave" type="button">把这一课刻成式盘</button>
+          </div>
+          <details class="x-pro">
+            <summary>专业模式</summary>
+            <dl id="r-pro"></dl>
+          </details>
+          <p class="x-disc">这是一种古老的思考工具，不是预言。决定权和责任都在你。涉及健康、法律、投资请找专业人士。</p>
+        </section>
+
+        <section class="x-panel x-shop" id="shop" aria-labelledby="shop-h">
+          <h2 id="shop-h">把关键时刻带回家</h2>
+          <p>周边商店 · 3D 按需打印</p>
+
+          <article class="x-item" id="item-shipan">
+            <img src="assets/e4f8e8f6cd.png" alt="迷你六壬式盘，圆形天盘置于方形地盘之上"/>
+            <h3><b>迷你六壬式盘<i class="x-badge">招牌</i></b><span>¥199 起</span></h3>
+            <p>天盘可转、地盘固定，刻上你某次关键起课的盘面＋名字日期，致敬汉代六壬式盘。刻字款 ¥299，黄铜轴款 ¥399。</p>
+            <label class="x-label" for="sp-name">昵称</label>
+            <input class="x-input" id="sp-name" maxlength="12" placeholder="刻在地盘边上"/>
+            <label class="x-label" for="sp-time">起课时间（北京时间）</label>
+            <input class="x-input" id="sp-time" type="datetime-local"/>
+            <label class="x-label" for="sp-style">款式</label>
+            <select class="x-input" id="sp-style">
+              <option value="基础款 ¥199">基础款 ¥199</option>
+              <option value="刻字款 ¥299">刻字款 ¥299</option>
+              <option value="黄铜轴款 ¥399">黄铜轴款 ¥399</option>
+            </select>
+            <button class="x-btn x-btn--red" type="button" data-buy="shipan">立即预订</button>
+          </article>
+
+          <article class="x-item" id="item-tianjiang">
+            <img src="assets/47bfe1b4b5.png" alt="守护天将手办"/>
+            <h3>守护天将手办<span>¥69 起</span></h3>
+            <p>盲盒 ¥69；定制款 ¥159，可选天将、底座刻字。</p>
+            <label class="x-label" for="tj-style">款式</label>
+            <select class="x-input" id="tj-style">
+              <option value="盲盒 ¥69">盲盒 ¥69</option>
+              <option value="定制款 ¥159">定制款 ¥159</option>
+            </select>
+            <div id="tj-custom" hidden="">
+              <label class="x-label" for="tj-god">选天将</label>
+              <select class="x-input" id="tj-god"></select>
+              <label class="x-label" for="tj-text">底座刻字</label>
+              <input class="x-input" id="tj-text" maxlength="12"/>
+            </div>
+            <button class="x-btn x-btn--red" type="button" data-buy="tianjiang">立即预订</button>
+          </article>
+
+          <article class="x-item" id="item-sanchuan">
+            <img src="assets/a57fda5f9d.png" alt="三传叠片摆件，三层透明叠片"/>
+            <h3>三传叠片摆件<span>¥129 起</span></h3>
+            <p>初、中、末三层叠片，¥129；刻字款 ¥169。</p>
+            <label class="x-label" for="sc-style">款式</label>
+            <select class="x-input" id="sc-style">
+              <option value="标准款 ¥129">标准款 ¥129</option>
+              <option value="刻字款 ¥169">刻字款 ¥169</option>
+            </select>
+            <button class="x-btn x-btn--red" type="button" data-buy="sanchuan">立即预订</button>
+          </article>
+
+          <p class="x-fine">3D 按需打印，约 5–10 天发货；定制商品不支持无理由退换。周边为文创纪念品，不具备任何开运、转运功效。</p>
+        </section>
+      </main>
+    </div>
+
+    <div class="x-modal" id="modal" hidden="" role="dialog" aria-modal="true" aria-labelledby="m-h">
+      <div class="x-sheet">
+        <h3 id="m-h">预约订单</h3>
+        <pre id="m-sum"></pre>
+        <p>首批 3D 打印定制款即将开售，开通后第一时间通知你。</p>
+        <label class="x-label" for="m-contact">手机号或微信</label>
+        <input class="x-input" id="m-contact" maxlength="40"/>
+        <div class="x-row">
+          <button class="x-btn x-btn--red" id="m-ok" type="button">提交预约</button>
+          <button class="x-btn" id="m-x" type="button">取消</button>
+        </div>
+      </div>
+    </div>
+    <div class="x-toast" id="toast" role="status"></div>
+
+    <script>/* Page behaviors for Hark's component library: the nav, the theme toggle, tables and images. style-gates: data */
+(function () {
+  "use strict";
+  var doc = document, root = doc.documentElement;
+  root.classList.add("js");
+  var LOGO = '<svg width="SIZE" height="SIZE" viewBox="0 0 36 36" fill="none" aria-hidden="true"><path fill="currentColor" d="M25.096 30c-.072 0-.12-.048-.168-.12-4.776-6.384-12.216-10.8-20.736-11.688C4.048 18.168 4 18.096 4 18s.048-.168.192-.192c8.52-.888 15.96-5.304 20.736-11.688.048-.072.096-.12.168-.12s.096.024.168.072A15.02 15.02 0 0 1 31.12 18a15.02 15.02 0 0 1-5.856 11.928c-.072.048-.096.072-.168.072"/></svg>';
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+  function each(a, f) { return (a || []).map(f).join(""); }
+  function autoNav() {
+    var sections = [].slice.call(doc.querySelectorAll("section[data-nav]"));
+    var header = doc.querySelector("header.nav[data-auto]");
+    if (header) {
+      header.innerHTML = '<nav class="seg" aria-label="Sections">' +
+        each(sections, function (s) { return '<a href="#' + esc(s.id) + '">' + esc(s.getAttribute("data-nav")) + "</a>"; }) + "</nav>" +
+        '<button class="theme-btn" id="theme-btn" type="button" aria-label="Switch to dark theme"></button>';
+    }
+    [].slice.call(doc.querySelectorAll(".foot nav[data-auto]")).forEach(function (n) {
+      n.innerHTML = '<a href="#top">Top</a>' + each(sections, function (s) { return '<a href="#' + esc(s.id) + '">' + esc(s.getAttribute("data-nav")) + "</a>"; });
+    });
+    [].slice.call(doc.querySelectorAll(".table-wrap table")).forEach(function (t) {
+      var names = [].map.call(t.querySelectorAll("thead th"), function (th) { return th.textContent.trim(); });
+      [].slice.call(t.querySelectorAll("tbody tr")).forEach(function (tr) {
+        [].slice.call(tr.children).forEach(function (c, i) {
+          if (c.tagName !== "TD") return;
+          if (!c.textContent.trim() && !c.querySelector("img, svg")) c.classList.add("is-empty");
+          else if (names[i] && !c.hasAttribute("data-label")) c.setAttribute("data-label", names[i]);
+        });
+      });
+    });
+    [].slice.call(doc.querySelectorAll(".compare table")).forEach(function (t) {
+      t.parentNode.style.setProperty("--compare-cols", t.querySelectorAll("thead th").length);
+      [].slice.call(t.querySelectorAll(".compare__media .chip")).forEach(function (chip) {
+        chip.closest("th").appendChild(chip);
+      });
+      [].slice.call(t.querySelectorAll("tbody tr")).forEach(function (tr) {
+        var head = tr.querySelector("th"), label = head ? head.textContent.trim() : "";
+        [].slice.call(tr.querySelectorAll("td")).forEach(function (td) {
+          if (label && !td.hasAttribute("data-label")) td.setAttribute("data-label", label);
+        });
+      });
+    });
+    [].slice.call(doc.querySelectorAll(".step__figure img, .band img")).forEach(function (im) {
+      var mark = function () { if (im.naturalHeight > im.naturalWidth) im.parentNode.classList.add("is-portrait"); };
+      if (im.complete) mark(); else im.addEventListener("load", mark);
+    });
+    [].slice.call(doc.querySelectorAll(".hark-mark:empty")).forEach(function (m) { m.innerHTML = LOGO.replace(/SIZE/g, m.getAttribute("data-size") || "20"); });
+  }
+
+  // Gives each day of plans a toggle and opens the first day. hark-trip.css shows the toggle, and
+  // closes the other days, only on a phone.
+  function dayToggles() {
+    [].slice.call(doc.querySelectorAll(".timeline > li")).forEach(function (day, i) {
+      var what = day.querySelector(".timeline__what");
+      if (!what || !what.querySelector(".plan") || what.querySelector(".day__toggle")) return;
+      var btn = doc.createElement("button");
+      btn.type = "button";
+      btn.className = "day__toggle";
+      var label = function () {
+        var open = day.classList.contains("is-open");
+        btn.textContent = open ? "Hide details" : "Show details";
+        btn.setAttribute("aria-expanded", open ? "true" : "false");
+      };
+      if (i === 0) day.classList.add("is-open");
+      btn.addEventListener("click", function () { day.classList.toggle("is-open"); label(); });
+      label();
+      what.appendChild(btn);
+    });
+  }
+
+  function behaviors() {
+    var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var btn = doc.getElementById("theme-btn"), mq = window.matchMedia("(prefers-color-scheme: dark)");
+    try { var saved = localStorage.getItem("hark-theme"); if (saved === "light" || saved === "dark") root.setAttribute("data-theme", saved); } catch (e) { /* storage blocked: follow the system theme */ }
+    function current() { var t = root.getAttribute("data-theme"); return t === "light" || t === "dark" ? t : (mq.matches ? "dark" : "light"); }
+    function label() { if (btn) btn.setAttribute("aria-label", current() === "dark" ? "Switch to light theme" : "Switch to dark theme"); }
+    if (btn) btn.addEventListener("click", function () {
+      var next = current() === "dark" ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      try { localStorage.setItem("hark-theme", next); } catch (e) { /* storage blocked: the choice lasts this visit */ }
+      label();
+    });
+    label();
+
+    var seg = doc.querySelector(".seg");
+    if (seg) {
+      var links = [].slice.call(seg.querySelectorAll("a"));
+      var targets = links.map(function (a) { return doc.getElementById(a.getAttribute("href").slice(1)); });
+      var active = -2;
+      var reveal = function (i) {
+        if (i < 0) return;
+        var a = links[i];
+        var l = a.offsetLeft - 8, r = a.offsetLeft + a.offsetWidth + 8;
+        if (l < seg.scrollLeft || r > seg.scrollLeft + seg.clientWidth) seg.scrollTo({ left: l, behavior: reduce ? "auto" : "smooth" });
+      };
+      var sync = function (force) {
+        var line = window.innerHeight * 0.32, cur = -1;
+        targets.forEach(function (t, i) { if (t && t.getBoundingClientRect().top <= line) cur = i; });
+        if (cur === active && !force) return;
+        active = cur;
+        links.forEach(function (a, i) { if (i === cur) a.setAttribute("aria-current", "true"); else a.removeAttribute("aria-current"); });
+        reveal(cur);
+      };
+      var ticking = false;
+      window.addEventListener("scroll", function () {
+        if (ticking) return; ticking = true;
+        window.requestAnimationFrame(function () { sync(false); ticking = false; });
+      }, { passive: true });
+      window.addEventListener("resize", function () { sync(true); }, { passive: true });
+      if (doc.fonts && doc.fonts.ready) doc.fonts.ready.then(function () { sync(true); });
+      sync(true);
+    }
+
+  }
+
+  function start() {
+    autoNav();
+    dayToggles();
+    behaviors();
+  }
+  if (doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", start);
+  else start();
+})();
+</script>
+    <script>
+      const SHOP_LINKS = { shipan: '', tianjiang: '', sanchuan: '' };
+      (function () {
+        const G = '甲乙丙丁戊己庚辛壬癸', Z = '子丑寅卯辰巳午未申酉戌亥';
+        const GE = [0,0,1,1,2,2,3,3,4,4], ZE = [4,2,0,0,2,1,1,2,3,3,2,4];
+        const JI = [2,4,5,7,5,7,8,10,11,1];
+        const GODS = ['贵人','螣蛇','朱雀','六合','勾陈','青龙','天空','白虎','太常','玄武','太阴','天后'];
+        const PLAIN = ['有人帮','心里犯嘀咕','消息与口舌','撮合成事','拖拉纠缠','财与喜','画饼落空','冲突与风险','吃喝与稳当','信息不透明','暗中有助','温柔照拂'];
+        const GOOD = [1,-1,-1,1,-1,1,-1,-1,1,-1,1,1];
+        const XING = {0:3,3:0,2:5,5:8,8:2,1:10,10:7,7:1};
+        const DIR = '正北 东北 东北 正东 东南 东南 正南 西南 西南 正西 西北 西北'.split(' ');
+        const GUI = {0:[1,7],4:[1,7],6:[1,7],1:[0,8],5:[0,8],2:[11,9],3:[11,9],8:[5,3],9:[5,3],7:[6,2]};
+        const m = (a, n) => ((a % n) + n) % n;
+        const sheng = (a, b) => m(a + 1, 5) === b, ke = (a, b) => m(a + 2, 5) === b;
+
+        function jdn(y, mo, d) {
+          const a = Math.floor((14 - mo) / 12), yy = y + 4800 - a, mm = mo + 12 * a - 3;
+          return d + Math.floor((153 * mm + 2) / 5) + 365 * yy + Math.floor(yy / 4) - Math.floor(yy / 100) + Math.floor(yy / 400) - 32045;
+        }
+        function sunLon(jd) {
+          const T = (jd - 2451545) / 36525, r = Math.PI / 180;
+          const L0 = 280.46646 + 36000.76983 * T + 0.0003032 * T * T;
+          const M = (357.52911 + 35999.05029 * T - 0.0001537 * T * T) * r;
+          const C = (1.914602 - 0.004817 * T - 0.000014 * T * T) * Math.sin(M) + (0.019993 - 0.000101 * T) * Math.sin(2 * M) + 0.000289 * Math.sin(3 * M);
+          return m(L0 + C, 360);
+        }
+        function liuqin(g, b) {
+          const a = GE[g], e = ZE[b];
+          return a === e ? '兄弟' : sheng(a, e) ? '子孙' : ke(a, e) ? '妻财' : ke(e, a) ? '官鬼' : '父母';
+        }
+
+        // t: 北京时间 {y,mo,d,h,mi}
+        function cast(t) {
+          const J = jdn(t.y, t.mo, t.d);
+          const di = m(J + (t.h === 23 ? 1 : 0) + 49, 60), g = di % 10, z = di % 12, yang = g % 2 === 0;
+          const hz = Math.floor((t.h + 1) / 2) % 12;
+          const L = sunLon(J - 0.5 + (t.h + t.mi / 60 - 8) / 24), yj = m(10 - Math.floor(L / 30), 12);
+          const U = (x) => m(x + yj - hz, 12), D = (x) => m(x - yj + hz, 12);
+          const k1 = { d: JI[g], u: U(JI[g]) }, k2 = { d: k1.u, u: U(k1.u) }, k3 = { d: z, u: U(z) }, k4 = { d: k3.u, u: U(k3.u) };
+          const K = [k1, k2, k3, k4];
+          const dEl = (i) => (i === 0 ? GE[g] : ZE[K[i].d]);
+          const diff = m(yj - hz, 12), ym = [2,11,8,5][z % 4], xc = [9,6,3,0][z % 4];
+          const zei = [], kk = [];
+          K.forEach((k, i) => { const de = dEl(i), ue = ZE[k.u]; if (ke(de, ue)) zei.push(i); else if (ke(ue, de)) kk.push(i); });
+          function pick(list) {
+            const ups = [...new Set(list.map((i) => K[i].u))];
+            if (ups.length === 1) return [ups[0], null];
+            const same = list.filter((i) => K[i].u % 2 === g % 2), su = [...new Set(same.map((i) => K[i].u))];
+            if (su.length === 1) return [su[0], '知一'];
+            const rank = (i) => { const b = K[i].d; return [2,5,8,11].includes(b) ? 0 : [0,3,6,9].includes(b) ? 1 : 2; };
+            const pool = (same.length ? same : list).slice().sort((a, b) => rank(a) - rank(b) || (yang ? a - b : b - a));
+            return [K[pool[0]].u, '涉害'];
+          }
+          const zk = zei.length ? zei : kk;
+          let c, mid, end, type, fan = diff === 6;
+          if (diff === 0) {
+            type = '伏吟'; c = yang ? k1.u : k3.u;
+            mid = XING[c]; if (mid === undefined) mid = yang ? k3.u : k1.u;
+            end = XING[mid]; if (end === undefined || end === mid || end === c) end = m(mid + 6, 12);
+          } else if (fan && !zk.length) {
+            type = '返吟'; c = ym; mid = k3.u; end = k1.u;
+          } else if (zk.length) {
+            const [b, t2] = pick(zk); c = b; type = t2 || (zei.length ? '重审' : '元首');
+          } else {
+            let yk = [];
+            K.forEach((k, i) => { if (i > 0 && ke(ZE[k.u], GE[g])) yk.push(i); });
+            if (!yk.length) K.forEach((k, i) => { if (i > 0 && ke(GE[g], ZE[k.u])) yk.push(i); });
+            if (yk.length) { c = pick(yk)[0]; type = '遥克'; }
+            else if ([[0,2],[6,8],[3,7],[5,7]].some((p) => p[0] === g && p[1] === z)) {
+              type = '八专'; c = yang ? m(k1.u + 2, 12) : m(k4.u - 2, 12); mid = end = k1.u;
+            } else if (new Set(K.map((k) => k.d + '-' + k.u)).size < 4) {
+              type = '别责'; c = yang ? U(JI[(g + 5) % 10]) : m(z + 4, 12); mid = end = k1.u;
+            } else {
+              type = '昂星';
+              if (yang) { c = U(9); mid = k3.u; end = k1.u; } else { c = D(9); mid = k1.u; end = k3.u; }
+            }
+          }
+          if (mid === undefined) { mid = U(c); end = U(mid); }
+          const day = hz >= 3 && hz <= 8, gu = GUI[g][day ? 0 : 1], shun = [11,0,1,2,3,4].includes(D(gu));
+          const god = (b) => m(shun ? b - gu : gu - b, 12);
+          const s0 = di - (di % 10), kong = [m(s0 + 10, 12), m(s0 + 11, 12)];
+          const chuan = [c, mid, end].map((b) => ({ b, q: liuqin(g, b), god: god(b) }));
+          const xuanwu = m(shun ? gu + 9 : gu - 9, 12);
+          return { t, di, g, z, yang, hz, yj, L, K, type, fan, chuan, day, gu, shun, kong, ym, xc, xwDi: D(xuanwu) };
+        }
+
+        const CATS = [
+          { k: '发消息', g: {2:1,3:1} },
+          { k: '约会感情', g: {3:1,11:1}, br: 'xc' },
+          { k: '面试谈薪', g: {0:1,2:1}, q: '官鬼' },
+          { k: '换工作', g: {5:1}, q: '官鬼', br: 'ym' },
+          { k: '买不买', g: {5:1}, q: '妻财' },
+          { k: '出行', g: {7:-1}, br: 'ym' },
+          { k: '等结果', g: {0:1} },
+          { k: '找东西', g: {} },
+        ];
+
+        function score(r, ci) {
+          const cat = CATS[ci], a = GE[r.g], tags = [];
+          const rel = (b) => { const e = ZE[b]; return sheng(e, a) ? 2 : a === e ? 1 : ke(a, e) ? 1 : sheng(a, e) ? 0 : -2; };
+          let s = rel(r.chuan[2].b) + rel(r.chuan[0].b) / 2;
+          r.chuan.forEach((p) => {
+            s += p.god in cat.g ? cat.g[p.god] * 2 : GOOD[p.god];
+            if (cat.q && p.q === cat.q) s += 1;
+            if (cat.br && p.b === r[cat.br]) s += 1;
+          });
+          if (r.kong.includes(r.chuan[2].b)) { s -= 1; tags.push('有点虚'); }
+          if (r.type === '伏吟') { s -= 1; tags.push('卡住了'); }
+          if (r.fan) tags.push('反复横跳');
+          if (r.type === '元首') { s += 1; tags.push('主动出击'); }
+          if (r.type === '重审') tags.push('先难后易');
+          return { s, w: s >= 2 ? 0 : s <= -2 ? 2 : 1, tags };
+        }
+
+        const T = [
+          [[['三传一路顺下来，可以发，但别连发三条。','消息这条路是通的，对方接得住。'],['今晚睡前发，语气轻一点，留个问号让对方好接。','从一件具体的小事开口，比「在吗」好用十倍。']],
+           [['能发，但对方状态有点飘，回复可能慢半拍。','开头顺，后面要看你怎么接话。'],['发一条就停，回不回都先去做别的事。','把最想说的那句，留到对方回了再说。']],
+           [['现在发容易已读不回，不是你不好，是时机差点意思。','这一课有点卡，话说出去容易被误读。'],['先写进备忘录，明天中午再看一眼还想不想发。','先给朋友看一眼草稿，删掉一半再说。']]],
+          [[['撮合的力量在场，气氛比你想的更好。','这一课走得顺，对方对你有好感的概率不低。'],['主动约一个具体的时间地点，别说「改天」。','把想说的话说清楚，真诚比技巧管用。']],
+           [['有好感，但中间有点小磕绊要磨。','关系在往前走，只是节奏比你想的慢。'],['先约个轻松的活动，不急着定义关系。','多听对方说，少给自己加戏。']],
+           [['现在推进容易用力过猛，双方都会累。','情绪在高处，判断容易失真。'],['这周先把注意力放回自己身上。','把想问的问题写下来，三天后再看要不要问。']]],
+          [[['有贵人和好消息的影子，你的筹码比想象中硬。','三传落在你这边，可以大胆一点。'],['报价往上加一档，再讲清你的理由。','准备一个你做成过的具体案例，开场就讲。']],
+           [['能谈，但对方也在掂量，需要多一点耐心。','机会在，细节决定成败。'],['先问清楚预算范围，再报你的数。','把福利、假期一起摆上桌，不只盯底薪。']],
+           [['现在硬谈容易僵，先别把话说死。','这一课阻力偏大，对面未必是拍板的人。'],['先争取更多信息，约下一轮再谈数字。','准备好退一步的方案，别当场答应或拒绝。']]],
+          [[['动的气象明显，新位置在向你招手。','这一课鼓励你挪一挪，外面有财也有喜。'],['今天就更新简历，投出第一份。','约一位在目标公司的朋友喝杯咖啡。']],
+           [['想走可以，但下家还没完全落地。','变动有利有弊，信息还不够全。'],['先把下家谈到书面 offer 再提离职。','列一张新旧对比表，只写你最在乎的三项。']],
+           [['现在跳，容易从一个坑跳进另一个坑。','动的力量不足，冲动成分偏多。'],['先在现在的位置攒一个拿得出手的成果。','给自己定一个三个月后的复盘日。']]],
+          [[['钱花得出去也回得来，这笔不亏。','财和喜都在线，买了大概率开心。'],['比两家价，然后果断下单。','买之前确认一下退换规则就行。']],
+           [['可以买，但未必是最划算的时机。','喜欢是真的，必要性还要打个问号。'],['放进购物车，48 小时后还想要再买。','找一个更便宜的替代品对比一下。']],
+           [['这笔钱现在花出去，心疼可能比开心多。','冲动消费的味道有点重。'],['先把这笔钱转进另一个账户，下个月再说。','问问自己：如果不能退，还买吗？']]],
+          [[['驿马动得正，出门顺风顺水。','路上有照应，行程推进顺。'],['定下来就别反复改，提前 15 分钟出发。','多带一个充电宝，然后好好玩。']],
+           [['能去，路上会有点小插曲。','行程可行，但细节容易出岔子。'],['订可免费取消的票和房，留个 Plan B。','出发前再核对一遍证件和时间。']],
+           [['路上冲突和意外的影子偏重，不急就缓缓。','这趟折腾的成本可能比收获大。'],['能改期就改期，或换一个近一点的地方。','真要出门，多留缓冲时间，别赶。']]],
+          [[['有人在帮你推，结果偏向你想要的方向。','这一课收尾收得稳，等等会有好消息。'],['该做的已经做了，今天先去做点别的。','过两天可以礼貌地跟进一次。']],
+           [['结果还在路上，可能比预期晚一点。','有希望，但中间还有一道关。'],['给自己设个截止日，到点再问一次。','同时准备一个备选，心里就不慌了。']],
+           [['这次的结果可能不太如意，但它不是全部。','等待的过程会有点磨人。'],['别守着手机刷新，先推进下一个机会。','把这次的经验记下来，下次用得上。']]],
+          [[['东西还在，大概率没走远。','线索清楚，找回来的可能性高。'],['重点看{dir}方向的角落。','往{dir}方向，从低处往高处翻一遍。']],
+           [['东西还在，但被什么压住或挡住了。','要多花点工夫，线索有点绕。'],['先翻{dir}方向，再查包里的夹层。','回想最后一次用它的场景，往{dir}找。']],
+           [['东西可能被挪走，或混进了别处。','这次不太好找，别和自己较劲。'],['问问同住的人，再顺手看看{dir}方向。','限时 15 分钟，往{dir}找，找不到就先放下。']]],
+        ];
+        const WX = [['☀️','顺','可以往前走'],['⛅','可行但要留意','走，但看着点路'],['🌧','先缓缓','不是不行，是等等更好']];
+
+        function hash(str) { let h = 2166136261; for (const ch of str) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619); } return h >>> 0; }
+        const pad = (n) => String(n).padStart(2, '0');
+        const $ = (id) => document.getElementById(id);
+
+        // UI
+        let cat = -1, custom = false, last = null;
+        const cats = $('cats');
+        CATS.forEach((c, i) => {
+          const b = document.createElement('button');
+          b.type = 'button'; b.className = 'x-chip'; b.textContent = c.k; b.setAttribute('aria-pressed', 'false');
+          b.onclick = () => { cat = i; [...cats.children].forEach((x, j) => x.setAttribute('aria-pressed', String(j === i))); $('hint').textContent = '准备好了就点「起课」'; };
+          cats.appendChild(b);
+        });
+        const ring = $('ring');
+        for (let i = 0; i < 12; i++) {
+          const s = document.createElement('span');
+          s.textContent = Z[i];
+          s.style.transform = `rotate(${i * 30}deg) translateY(-86px) rotate(${-i * 30}deg)`;
+          ring.appendChild(s);
+        }
+        function bjNow() {
+          const d = new Date(Date.now() + 8 * 3600e3);
+          return { y: d.getUTCFullYear(), mo: d.getUTCMonth() + 1, d: d.getUTCDate(), h: d.getUTCHours(), mi: d.getUTCMinutes() };
+        }
+        const fmtLocal = (t) => `${t.y}-${pad(t.mo)}-${pad(t.d)}T${pad(t.h)}:${pad(t.mi)}`;
+        function setMode(c) {
+          custom = c; $('t-now').setAttribute('aria-pressed', String(!c)); $('t-custom').setAttribute('aria-pressed', String(c));
+          $('dt').hidden = !c; if (c && !$('dt').value) $('dt').value = fmtLocal(bjNow());
+        }
+        $('t-now').onclick = () => setMode(false);
+        $('t-custom').onclick = () => setMode(true);
+        function getTime() {
+          if (custom) {
+            const v = $('dt').value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+            if (v) return { y: +v[1], mo: +v[2], d: +v[3], h: +v[4], mi: +v[5] };
+          }
+          return bjNow();
+        }
+
+        function render(r, ci) {
+          const sc = score(r, ci), q = $('q').value.trim();
+          const t = r.t, key = `${t.y}${t.mo}${t.d}${t.h}${t.mi}`, h = hash(key + ci + q);
+          const tpl = T[ci][sc.w], dir = DIR[r.xwDi];
+          const fill = (s) => s.replace(/\{dir\}/g, dir);
+          $('r-emo').textContent = WX[sc.w][0];
+          $('r-wx').textContent = WX[sc.w][1];
+          $('r-meta').textContent = `${CATS[ci].k} · 北京时间 ${t.y}-${pad(t.mo)}-${pad(t.d)} ${pad(t.h)}:${pad(t.mi)}` + (q ? ` · 「${q}」` : '');
+          $('r-why').textContent = fill(tpl[0][h % 2]);
+          $('r-do').textContent = fill(tpl[1][(h >>> 1) % 2]) + (ci === 7 && !/\{dir\}/.test(tpl[1][(h >>> 1) % 2]) ? `（玄武落${Z[r.xwDi]}，${dir}）` : '');
+          const tags = $('r-tags'); tags.innerHTML = '';
+          const add = (txt, red) => { const s = document.createElement('span'); s.className = 'x-tag' + (red ? ' x-tag--red' : ''); s.textContent = txt; tags.appendChild(s); };
+          add('课体 · ' + r.type, true);
+          sc.tags.forEach((x) => add(x, true));
+          add('旬空 ' + r.kong.map((k) => Z[k]).join(''));
+          add('驿马 ' + Z[r.ym]);
+          add('咸池 ' + Z[r.xc]);
+          if (ci === 7) add('玄武在' + dir);
+          const acts = $('r-acts'); acts.innerHTML = '';
+          ['起因','过程','结局'].forEach((n, i) => {
+            const p = r.chuan[i], d = document.createElement('div');
+            d.className = 'x-scene';
+            d.innerHTML = `<small>${n}</small><b>${Z[p.b]}</b><span>${GODS[p.god]}</span><em>${PLAIN[p.god]}</em>`;
+            acts.appendChild(d);
+          });
+          const pro = [
+            ['日柱', G[r.g] + Z[r.z] + '日' + (r.yang ? '（阳）' : '（阴）')],
+            ['时支', Z[r.hz] + '时'],
+            ['月将', Z[r.yj] + '将 · 太阳黄经 ' + r.L.toFixed(1) + '°'],
+            ['四课', r.K.map((k, i) => `${'一二三四'[i]}课 ${Z[k.u]}/${i === 0 ? G[r.g] : Z[k.d]}`).join('　')],
+            ['三传', r.chuan.map((p, i) => `${'初中末'[i]} ${Z[p.b]} ${p.q} ${GODS[p.god]}`).join('　')],
+            ['课体', r.type + (r.fan && r.type !== '返吟' ? '（返吟）' : '')],
+            ['旬空', r.kong.map((k) => Z[k]).join('')],
+            ['贵人', `${r.day ? '昼' : '夜'}贵 ${Z[r.gu]} · ${r.shun ? '顺' : '逆'}布`],
+            ['倾向分', String(sc.s)],
+          ];
+          $('r-pro').innerHTML = pro.map(([a, b]) => `<dt>${a}</dt><dd>${b}</dd>`).join('');
+          const res = $('result'); res.hidden = false;
+          res.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+        }
+
+        $('go').onclick = () => {
+          if (cat < 0) { $('hint').textContent = '先选一个类别，再起课'; cats.querySelector('button').focus(); return; }
+          const t = getTime(), r = cast(t);
+          last = r; $('go').disabled = true; ring.classList.remove('is-spin'); void ring.offsetWidth; ring.classList.add('is-spin');
+          setTimeout(() => { ring.classList.remove('is-spin'); $('go').disabled = false; render(r, cat); }, 1000);
+        };
+        $('again').onclick = () => { $('cast').scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+        $('engrave').onclick = () => {
+          if (last) $('sp-time').value = fmtLocal(last.t);
+          $('item-shipan').scrollIntoView({ behavior: 'smooth', block: 'start' });
+          setTimeout(() => $('sp-name').focus({ preventScroll: true }), 400);
+        };
+
+        // shop
+        GODS.forEach((n, i) => { const o = document.createElement('option'); o.value = n; o.textContent = `${n} · ${PLAIN[i]}`; $('tj-god').appendChild(o); });
+        $('tj-style').onchange = () => { $('tj-custom').hidden = $('tj-style').value.indexOf('定制') < 0; };
+        function summary(k) {
+          if (k === 'shipan') return `迷你六壬式盘 · ${$('sp-style').value}\n昵称：${$('sp-name').value.trim() || '（未填）'}\n起课时间：${$('sp-time').value.replace('T', ' ') || '（未填）'}`;
+          if (k === 'tianjiang') { const c = $('tj-style').value; return `守护天将手办 · ${c}` + (c.indexOf('定制') >= 0 ? `\n天将：${$('tj-god').value}\n底座刻字：${$('tj-text').value.trim() || '（未填）'}` : ''); }
+          return `三传叠片摆件 · ${$('sc-style').value}` + (last ? `\n三传：${last.chuan.map((p) => Z[p.b]).join(' → ')}` : '');
+        }
+        const modal = $('modal');
+        document.querySelectorAll('[data-buy]').forEach((b) => {
+          b.onclick = () => {
+            const k = b.dataset.buy;
+            if (SHOP_LINKS[k]) { window.open(SHOP_LINKS[k], '_blank', 'noopener'); return; }
+            $('m-sum').textContent = summary(k); modal.hidden = false; $('m-contact').focus();
+          };
+        });
+        const closeModal = () => { modal.hidden = true; };
+        $('m-x').onclick = closeModal;
+        modal.onclick = (e) => { if (e.target === modal) closeModal(); };
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !modal.hidden) closeModal(); });
+        let tt;
+        function toast(s) { const el = $('toast'); el.textContent = s; el.classList.add('is-on'); clearTimeout(tt); tt = setTimeout(() => el.classList.remove('is-on'), 2400); }
+        $('m-ok').onclick = () => {
+          if (!$('m-contact').value.trim()) { toast('请填写手机号或微信'); return; }
+          closeModal(); $('m-contact').value = ''; toast('预约成功，开售后第一时间通知你');
+        };
+        window.__cikeCast = cast;
+      })();
+    </script>
+  
+
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a59e6eb3cd8facc8',t:'MTc5NDU3OTc4Ng=='};var l=window.parent.location,o;try{o=new URL(l.origin).origin}catch(e){try{o=new URL(new URL(l.href).origin).origin}catch(e){o=''}}var u='/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=a59e6eb3cd8facc8',a=document.createElement('script');a.src=o?new URL(u,o).href:u;document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body></html>
